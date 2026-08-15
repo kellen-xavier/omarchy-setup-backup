@@ -12,7 +12,7 @@ data em vez de número de versão.
 
 - Suíte de testes com [bats-core](https://github.com/bats-core/bats-core)
   (`tests/`) cobrindo `export.sh`, `install.sh`, `personaliza-meu-omarchy.sh`
-  e os scripts de release — 32 testes.
+  e os scripts de release — 33 testes.
 - Pipeline de CI (`.github/workflows/ci.yml`): roda os testes e o lint
   (shellcheck + shfmt) em toda branch e PR; em push para `develop`/`feature/**`
   também aplica auto-fix de formatação e comita de volta.
@@ -41,6 +41,13 @@ data em vez de número de versão.
 - `install.sh`: `yay -S --needed $pkgs` (SC2086, word-splitting não
   intencional) e `[ -n "$app" ] && ... || true` (SC2015) trocados por um
   array (`mapfile`) e um `if` explícito.
+- `.github/scripts/insert-changelog-section.sh`: bullets já escritos à mão em
+  `[Não lançado]` antes da release ficavam órfãos abaixo da nova seção em vez
+  de entrar nela — corrigido pra preservar esse conteúdo dentro da seção nova.
+- `release.yml`: `git push origin main` falhava com `src refspec main does
+  not match any` porque o `actions/checkout` com `ref: <sha>` deixa o HEAD
+  destacado (sem branch local). Corrigido com `git checkout -B main` logo
+  após o checkout.
 
 ## [2026-08-15] - Script de personalização visual
 
