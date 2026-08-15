@@ -1,0 +1,14 @@
+# Apps detected on the source machine that don't map to a simple package
+# install — handle these manually on the new machine if you still need them.
+
+VS Code            -> run `omarchy-install-vscode` (Omarchy has a dedicated installer)
+JetBrains IDE(s)   -> install via JetBrains Toolbox (AUR: jetbrains-toolbox) or the
+                      specific IDE package (e.g. yay -S intellij-idea-ultimate-edition)
+GameMaker Studio 2 Beta -> manual Windows installer run through Wine/Bottles, no AUR pkg
+AffinityOnLinux    -> Wine-based wrapper, see https://github.com/Twig6943/AffinityOnLinux
+Unity (unity3d dir)-> managed through Unity Hub (see aur-extra.txt), install editor
+                      versions from inside Unity Hub itself
+Android Studio / SDK -> ~/Android/Sdk present; reinstall Android Studio (AUR:
+                      android-studio) then let it manage the SDK, or restore
+                      ~/Android/Sdk from your own backup separately (large, not
+                      included here)

@@ -1,0 +1,10 @@
+# Extra AUR packages (installed with yay) — best-effort guess from ~/.config,
+# NOT authoritative. Run export.sh on the real machine to regenerate.
+google-chrome
+opera
+slack-desktop
+sublime-text-4
+insomnia-bin
+bitwarden-bin
+duckstation
+unityhub

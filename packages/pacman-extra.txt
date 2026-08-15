@@ -1,0 +1,17 @@
+# Extra official-repo packages NOT already covered by Omarchy's base install
+# (Omarchy's own base/other package lists already cover things like alacritty,
+# btop, spotify, obsidian, typora, signal-desktop, 1password, etc. — don't
+# reinstall those here, `omarchy-reinstall-pkgs` handles them.)
+#
+# This list was inferred from ~/.config folders present on the source machine —
+# it is a BEST-EFFORT starting point, not authoritative. Run export.sh on the
+# real machine to regenerate this file with the true pacman -Qqe diff.
+calibre
+darktable
+ghostty
+gimp
+kitty
+qalculate-gtk
+qbittorrent
+atuin
+nwg-displays
