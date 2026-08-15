@@ -1,0 +1,97 @@
+name: CI
+
+# Valida os scripts em toda branch (feature/*, develop) e em PRs pra
+# develop/main. Push a develop/feature/* também aplica auto-fix de sintaxe
+# (shfmt) e comita a correção de volta. Push/PR a main só verifica (nunca
+# comita direto na main — lá só entra via merge revisado).
+on:
+  push:
+    branches: ["main", "develop", "feature/**"]
+  pull_request:
+    branches: ["main", "develop"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SHFMT_VERSION: "v3.10.0"
+
+jobs:
+  test:
+    name: Testes (bats)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar bats-core
+        run: |
+          git clone --quiet --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          sudo /tmp/bats-core/install.sh /usr/local
+
+      - name: Rodar suíte de testes
+        run: bats -r tests
+
+  lint-and-fix:
+    name: Lint + auto-fix (shellcheck + shfmt)
+    runs-on: ubuntu-latest
+    # Só corrige e comita de volta em push para develop/feature/*.
+    # Push/PR na main fica no modo somente-verificação (job lint-check).
+    if: github.event_name == 'push' && github.ref_name != 'main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Instalar shfmt
+        run: |
+          curl -sL "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64" -o /usr/local/bin/shfmt
+          chmod +x /usr/local/bin/shfmt
+
+      - name: shellcheck
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          shellcheck "${scripts[@]}"
+
+      - name: shfmt --write (auto-fix de formatação)
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          shfmt -w -i 2 -ci "${scripts[@]}"
+
+      - name: Comitar correções, se houver
+        run: |
+          if git diff --quiet; then
+            echo "Nada para corrigir."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "style: auto-fix de formatação dos scripts (shfmt) [skip ci]"
+          git push origin "HEAD:${{ github.ref_name }}"
+
+  lint-check:
+    name: Lint (somente verificação)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref_name == 'main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar shfmt
+        run: |
+          curl -sL "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64" -o /usr/local/bin/shfmt
+          chmod +x /usr/local/bin/shfmt
+
+      - name: shellcheck
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          shellcheck "${scripts[@]}"
+
+      - name: shfmt --diff
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          shfmt -d -i 2 -ci "${scripts[@]}"
