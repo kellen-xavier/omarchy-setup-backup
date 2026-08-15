@@ -22,6 +22,11 @@ Esta pasta foi gerada dentro de uma [sessão de agente sandboxed - leia mais aqu
 - `install.sh` — roda na máquina nova, depois de instalar o Omarchy do zero.
   Instala os pacotes extras, os apps flatpak, recria os webapps do Omarchy
   (ChatGPT, Discord, Figma, etc.) e restaura os dotfiles.
+- `personaliza-meu-omarchy.sh` — versão enxuta do `install.sh`: aplica só a
+  aparência (tema Omarchy, kitty/alacritty/ghostty, waybar, starship, btop,
+  fastfetch, hypr look'n'feel). Não mexe em pacotes nem em bindings/monitores.
+  Útil pra igualar o visual numa máquina que já tem tudo instalado. Aceita
+  `-y` (sem confirmação), `-n` (dry-run) e `-h` (ajuda).
 - `packages/` — listas de pacotes pacman/AUR/flatpak que você tem *além* do
   que o Omarchy já instala por padrão (o Omarchy tem seu próprio
   `omarchy-reinstall-pkgs` para a base — não duplicamos isso aqui).
