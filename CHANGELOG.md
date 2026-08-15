@@ -8,6 +8,8 @@ data em vez de número de versão.
 
 ## [Não lançado]
 
+## [v2026.08.15] - 2026-08-15
+
 ### Added
 
 - Suíte de testes com [bats-core](https://github.com/bats-core/bats-core)
@@ -48,6 +50,21 @@ data em vez de número de versão.
   not match any` porque o `actions/checkout` com `ref: <sha>` deixa o HEAD
   destacado (sem branch local). Corrigido com `git checkout -B main` logo
   após o checkout.
+
+### Added
+
+- add script de personalização (aa986f9)
+- backup sistema operacional omarchy (3245348)
+
+### Fixed
+
+- check tags release (e204a08)
+
+### Changed
+
+- add config de pipeline and tests (4763060)
+- add changelog into the repo (ffe5db0)
+
 
 ## [2026-08-15] - Script de personalização visual
 
