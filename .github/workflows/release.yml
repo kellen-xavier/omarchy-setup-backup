@@ -30,6 +30,9 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || 'main' }}
           fetch-depth: 0
 
+      - name: Anexar a um branch local (checkout deixa HEAD destacado)
+        run: git checkout -B main
+
       - name: Configurar identidade do bot
         run: |
           git config user.name "github-actions[bot]"
