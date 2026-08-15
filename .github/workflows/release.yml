@@ -1,0 +1,121 @@
+name: Release
+
+# Dispara depois que o workflow "CI" termina com sucesso EM UM PUSH NA MAIN
+# (ou seja, depois que develop foi mergeada). Gera changelog a partir dos
+# Conventional Commits desde a última tag, empacota a release e publica no
+# GitHub Releases. No final, sincroniza main de volta em develop.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Gerar release
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || 'main' }}
+          fetch-depth: 0
+
+      - name: Configurar identidade do bot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determinar última tag
+        id: lasttag
+        run: |
+          tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
+      - name: Checar se há commits novos desde a última tag
+        id: haschanges
+        run: |
+          range="${{ steps.lasttag.outputs.tag }}"
+          if [ -n "$range" ]; then
+            count=$(git rev-list "${range}..HEAD" --no-merges --count)
+          else
+            count=$(git rev-list HEAD --no-merges --count)
+          fi
+          echo "count=$count" >>"$GITHUB_OUTPUT"
+
+      - name: Calcular versão (calver, vAAAA.MM.DD[.N])
+        id: version
+        if: steps.haschanges.outputs.count != '0'
+        run: |
+          base="v$(date -u +%Y.%m.%d)"
+          version="$base"
+          n=1
+          while git rev-parse -q --verify "refs/tags/$version" >/dev/null; do
+            n=$((n + 1))
+            version="${base}.${n}"
+          done
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >>"$GITHUB_OUTPUT"
+
+      - name: Gerar notas da release
+        if: steps.haschanges.outputs.count != '0'
+        run: |
+          chmod +x .github/scripts/*.sh
+          .github/scripts/conventional-notes.sh "${{ steps.lasttag.outputs.tag }}" HEAD >/tmp/release-notes.md
+          cat /tmp/release-notes.md >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Atualizar CHANGELOG.md
+        if: steps.haschanges.outputs.count != '0'
+        run: |
+          .github/scripts/insert-changelog-section.sh \
+            CHANGELOG.md "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.date }}" /tmp/release-notes.md
+
+      - name: Empacotar release
+        if: steps.haschanges.outputs.count != '0'
+        run: |
+          pkg="omarchy-setup-backup-${{ steps.version.outputs.version }}.tar.gz"
+          tar -czf "/tmp/$pkg" \
+            dotfiles packages webapps \
+            export.sh install.sh personaliza-meu-omarchy.sh \
+            README.md CHANGELOG.md .gitignore
+          echo "pkg_path=/tmp/$pkg" >>"$GITHUB_ENV"
+
+      - name: Comitar CHANGELOG e criar tag
+        if: steps.haschanges.outputs.count != '0'
+        run: |
+          git add CHANGELOG.md
+          git commit -m "chore(release): ${{ steps.version.outputs.version }} [skip ci]"
+          git tag "${{ steps.version.outputs.version }}"
+          git push origin main
+          git push origin "${{ steps.version.outputs.version }}"
+
+      - name: Criar GitHub Release
+        if: steps.haschanges.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" "$pkg_path" \
+            --title "${{ steps.version.outputs.version }}" \
+            --notes-file /tmp/release-notes.md
+
+      - name: Sincronizar main de volta em develop
+        if: steps.haschanges.outputs.count != '0'
+        continue-on-error: true
+        run: |
+          git fetch origin develop
+          git checkout -B develop origin/develop
+          git merge --no-edit origin/main
+          git push origin develop
+
+      - name: Nada para lançar
+        if: steps.haschanges.outputs.count == '0'
+        run: echo "Nenhum commit novo desde ${{ steps.lasttag.outputs.tag || '(início do histórico)' }} — pulando release." >>"$GITHUB_STEP_SUMMARY"

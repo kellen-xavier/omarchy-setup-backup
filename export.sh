@@ -8,6 +8,17 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<EOF
+Uso: $(basename "$0")
+
+Regenera packages/*.txt (via pacman -Qqe / -Qqm / flatpak list) e dotfiles/
+a partir do estado atual desta máquina. Rode isso na máquina de origem antes
+de copiar o backup para outra máquina.
+EOF
+  exit 0
+fi
+
 OMARCHY_SHARE="$HOME/.local/share/omarchy"
 if [ ! -d "$OMARCHY_SHARE" ]; then
   echo "This doesn't look like an Omarchy machine ($OMARCHY_SHARE not found)." >&2
@@ -15,45 +26,55 @@ if [ ! -d "$OMARCHY_SHARE" ]; then
 fi
 
 echo "==> Exporting explicitly installed pacman packages..."
-pacman -Qqe > packages/pacman-all.txt
+pacman -Qqe >packages/pacman-all.txt
 
 echo "==> Exporting foreign (AUR) packages..."
-pacman -Qqm > packages/aur-extra.txt
+pacman -Qqm >packages/aur-extra.txt
 
 echo "==> Exporting flatpak apps..."
 if command -v flatpak >/dev/null; then
-  flatpak list --app --columns=application > packages/flatpak.txt
+  flatpak list --app --columns=application >packages/flatpak.txt
 else
-  : > packages/flatpak.txt
+  : >packages/flatpak.txt
 fi
 
 echo "==> Computing pacman-extra.txt (everything not in Omarchy's own base/other lists)..."
 if [ -d "$OMARCHY_SHARE/install" ]; then
-  grep -vE '^\s*(#|$)' "$OMARCHY_SHARE/install/omarchy-base.packages" "$OMARCHY_SHARE/install/omarchy-other.packages" \
-    | sort -u > /tmp/omarchy-default-pkgs.txt
-  comm -23 <(sort -u packages/pacman-all.txt) /tmp/omarchy-default-pkgs.txt > packages/pacman-extra.txt
-  rm -f /tmp/omarchy-default-pkgs.txt
+  default_pkgs="$(mktemp)"
+  trap 'rm -f "$default_pkgs"' EXIT
+  # -h evita o prefixo "arquivo:" que o grep adiciona ao ler vários arquivos,
+  # senão nenhuma linha bate no comm -23 abaixo e nada é filtrado.
+  grep -hvE '^\s*(#|$)' "$OMARCHY_SHARE/install/omarchy-base.packages" "$OMARCHY_SHARE/install/omarchy-other.packages" |
+    sort -u >"$default_pkgs"
+  comm -23 <(sort -u packages/pacman-all.txt) "$default_pkgs" >packages/pacman-extra.txt
 else
   cp packages/pacman-all.txt packages/pacman-extra.txt
 fi
 
 echo "==> Exporting Omarchy webapps (Name|URL)..."
-: > webapps/webapps.txt
+: >webapps/webapps.txt
 grep -l 'Exec=omarchy-launch-webapp' "$HOME"/.local/share/applications/*.desktop 2>/dev/null | while read -r f; do
   name=$(grep '^Name=' "$f" | head -1 | cut -d= -f2-)
   url=$(grep '^Exec=' "$f" | head -1 | sed -E 's/^Exec=omarchy-launch-webapp\s+//')
-  echo "${name}|${url}" >> webapps/webapps.txt
+  echo "${name}|${url}" >>webapps/webapps.txt
 done
 
 echo "==> Refreshing dotfiles..."
 rm -rf dotfiles
 mkdir -p dotfiles/.config/git
-for d in hypr waybar alacritty kitty ghostty tmux nvim btop fastfetch fcitx5 walker mako qalculate environment.d mise omarchy; do
-  [ -e "$HOME/.config/$d" ] && cp -rL --parents ".config/$d" dotfiles/ 2>/dev/null
-done
-(cd "$HOME" && for f in .config/starship.toml .config/mimeapps.list .config/xdg-terminals.list .bashrc .bash_profile; do
-  [ -e "$f" ] && cp --parents "$f" "$OLDPWD/dotfiles/" 2>/dev/null
-done)
+(
+  cd "$HOME"
+  for d in hypr waybar alacritty kitty ghostty tmux nvim btop fastfetch fcitx5 walker mako qalculate environment.d mise omarchy; do
+    if [ -e ".config/$d" ]; then
+      cp -rL --parents ".config/$d" "$OLDPWD/dotfiles/" 2>/dev/null || true
+    fi
+  done
+  for f in .config/starship.toml .config/mimeapps.list .config/xdg-terminals.list .bashrc .bash_profile; do
+    if [ -e "$f" ]; then
+      cp --parents "$f" "$OLDPWD/dotfiles/" 2>/dev/null || true
+    fi
+  done
+)
 [ -e "$HOME/.config/git/config" ] && cp "$HOME/.config/git/config" dotfiles/.config/git/config
 [ -e "$HOME/.config/git/ignore" ] && cp "$HOME/.config/git/ignore" dotfiles/.config/git/ignore
 find dotfiles -name "*.bak*" -delete
