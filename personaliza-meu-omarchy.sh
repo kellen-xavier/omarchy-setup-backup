@@ -37,15 +37,26 @@ readonly -a APPEARANCE_FILES=(
 # --- output helpers -------------------------------------------------------
 
 if [[ -t 1 ]]; then
-  C_INFO=$'\e[36m'; C_OK=$'\e[32m'; C_WARN=$'\e[33m'; C_ERR=$'\e[31m'; C_RESET=$'\e[0m'
+  C_INFO=$'\e[36m'
+  C_OK=$'\e[32m'
+  C_WARN=$'\e[33m'
+  C_ERR=$'\e[31m'
+  C_RESET=$'\e[0m'
 else
-  C_INFO=""; C_OK=""; C_WARN=""; C_ERR=""; C_RESET=""
+  C_INFO=""
+  C_OK=""
+  C_WARN=""
+  C_ERR=""
+  C_RESET=""
 fi
 
-log()   { printf '%s==>%s %s\n' "$C_INFO" "$C_RESET" "$*"; }
-ok()    { printf '%s✓%s %s\n' "$C_OK" "$C_RESET" "$*"; }
-warn()  { printf '%s!%s %s\n' "$C_WARN" "$C_RESET" "$*" >&2; }
-die()   { printf '%s✗%s %s\n' "$C_ERR" "$C_RESET" "$*" >&2; exit 1; }
+log() { printf '%s==>%s %s\n' "$C_INFO" "$C_RESET" "$*"; }
+ok() { printf '%s✓%s %s\n' "$C_OK" "$C_RESET" "$*"; }
+warn() { printf '%s!%s %s\n' "$C_WARN" "$C_RESET" "$*" >&2; }
+die() {
+  printf '%s✗%s %s\n' "$C_ERR" "$C_RESET" "$*" >&2
+  exit 1
+}
 
 usage() {
   cat <<EOF
@@ -81,9 +92,12 @@ run() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -y|--yes) ASSUME_YES=1 ;;
-    -n|--dry-run) DRY_RUN=1 ;;
-    -h|--help) usage; exit 0 ;;
+    -y | --yes) ASSUME_YES=1 ;;
+    -n | --dry-run) DRY_RUN=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
     *) die "Opção desconhecida: $1 (use --help)" ;;
   esac
   shift
@@ -134,7 +148,10 @@ if confirm "Restaurar configs de aparência (kitty, alacritty, ghostty, waybar, 
     src="$DOTFILES_DIR/$rel"
     dest="$HOME/$rel"
 
-    [[ -f "$src" ]] || { warn "Ausente no backup, pulando: $rel"; continue; }
+    [[ -f "$src" ]] || {
+      warn "Ausente no backup, pulando: $rel"
+      continue
+    }
 
     if [[ -f "$dest" ]] && ! cmp -s "$src" "$dest"; then
       run cp "$dest" "$dest.pre-personalize.bak"

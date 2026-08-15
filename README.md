@@ -75,3 +75,47 @@ cd ~/omarchy-setup-backup
 
 O script pergunta antes de cada etapa (pacotes, flatpak, webapps, dotfiles) e
 faz backup (`.pre-restore.bak`) de qualquer arquivo que for sobrescrever.
+
+## Desenvolvimento & CI/CD
+
+Fluxo de branches: `feature/*` → PR pra `develop` → PR de `develop` pra `main`.
+Commits seguem [Conventional Commits](https://www.conventionalcommits.org/)
+(`feat:`, `fix:`, `chore:`, `docs:`, ...) — a pipeline de release depende
+disso pra gerar o changelog automaticamente.
+
+### Testes
+
+```bash
+# instalar bats-core uma vez (https://github.com/bats-core/bats-core)
+git clone https://github.com/bats-core/bats-core.git /tmp/bats-core
+sudo /tmp/bats-core/install.sh /usr/local
+
+# rodar a suíte
+bats -r tests
+```
+
+Os testes rodam os scripts de verdade (não reimplementam a lógica): copiam
+`export.sh`/`install.sh`/`personaliza-meu-omarchy.sh` pra um diretório
+temporário junto de fixtures pequenas, apontam `$HOME` pra outro diretório
+temporário e usam mocks (`tests/test_helper/common.bash`) pra `pacman`, `yay`,
+`flatpak`, `omarchy-theme-set` etc. Nada toca a máquina real.
+
+### Pipeline (`.github/workflows/`)
+
+- **`ci.yml`** — em toda branch e PR: roda a suíte `bats` e o `shellcheck`.
+  Em push direto pra `develop`/`feature/**` (não pra `main`), também aplica
+  `shfmt -w` (auto-fix de formatação) e comita a correção de volta com
+  `[skip ci]`. Push/PR na `main` só verifica, nunca comita.
+- **`release.yml`** — dispara depois que a `ci.yml` termina com sucesso num
+  push na `main` (ou seja, depois que `develop` foi mergeada). Se houver
+  commits novos desde a última tag: calcula a versão (`vAAAA.MM.DD`, com
+  sufixo se já existir tag no dia), gera as notas a partir dos Conventional
+  Commits (`.github/scripts/conventional-notes.sh`), insere uma nova seção
+  no `CHANGELOG.md` logo abaixo de `[Não lançado]` preservando o que já
+  estava escrito lá à mão (`.github/scripts/insert-changelog-section.sh`),
+  empacota um `.tar.gz` da release, publica no GitHub Releases e sincroniza
+  `main` de volta em `develop`.
+
+**Configuração única no GitHub** (Settings → Actions → General → Workflow
+permissions): marque **"Read and write permissions"**, senão os jobs que
+comitam de volta (auto-fix e release) falham com 403.

@@ -3,10 +3,44 @@
 #
 # Assumes Omarchy is already installed (https://omarchy.org) — this script only
 # layers your personal extras and config tweaks on top of a fresh Omarchy install.
+#
+# Uso: ./install.sh [-y|--yes] [-h|--help]
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+ASSUME_YES=0
+
+usage() {
+  cat <<EOF
+Uso: $(basename "$0") [opções]
+
+Restaura pacotes extras, apps flatpak, webapps do Omarchy e dotfiles deste
+backup na máquina atual. Espera uma instalação Omarchy já existente.
+
+Opções:
+  -y, --yes    Não pergunta confirmação antes de cada etapa
+  -h, --help   Mostra esta ajuda
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -y | --yes) ASSUME_YES=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Opção desconhecida: $1 (use --help)" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
 confirm() {
+  [[ $ASSUME_YES -eq 1 ]] && return 0
+  local reply
   read -r -p "$1 [y/N] " reply
   [[ "$reply" =~ ^[Yy]$ ]]
 }
@@ -21,9 +55,9 @@ fi
 # --- Packages -----------------------------------------------------------
 if [ -s packages/pacman-extra.txt ] || [ -s packages/aur-extra.txt ]; then
   if confirm "Install extra pacman + AUR packages listed in packages/?"; then
-    pkgs=$(grep -vE '^\s*(#|$)' packages/pacman-extra.txt packages/aur-extra.txt 2>/dev/null | cut -d: -f2- | tr '\n' ' ')
-    if [ -n "$pkgs" ]; then
-      yay -S --needed $pkgs
+    mapfile -t pkgs < <(grep -vE '^\s*(#|$)' packages/pacman-extra.txt packages/aur-extra.txt 2>/dev/null | cut -d: -f2-)
+    if [ "${#pkgs[@]}" -gt 0 ]; then
+      yay -S --needed "${pkgs[@]}"
     fi
   fi
 fi
@@ -31,8 +65,10 @@ fi
 if [ -s packages/flatpak.txt ] && command -v flatpak >/dev/null; then
   if confirm "Install flatpak apps listed in packages/flatpak.txt?"; then
     while read -r app; do
-      [ -n "$app" ] && flatpak install -y flathub "$app" || true
-    done < packages/flatpak.txt
+      if [ -n "$app" ]; then
+        flatpak install -y flathub "$app" || true
+      fi
+    done <packages/flatpak.txt
   fi
 fi
 
@@ -50,7 +86,7 @@ if [ -s webapps/webapps.txt ] && command -v omarchy-webapp-install >/dev/null; t
       [[ "$name" =~ ^#.*$ || -z "$name" ]] && continue
       echo "-> $name ($url)"
       omarchy-webapp-install "$name" "$url" || echo "   failed, skipping"
-    done < webapps/webapps.txt
+    done <webapps/webapps.txt
   fi
 fi
 
