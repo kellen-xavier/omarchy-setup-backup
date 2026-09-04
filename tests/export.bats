@@ -23,7 +23,13 @@ base-devel
 EOF
 
   echo '{"custom": true}' >"$FAKE_HOME/.config/waybar/config.jsonc"
-  echo "[user]" >"$FAKE_HOME/.config/git/config"
+  cat >"$FAKE_HOME/.config/git/config" <<'EOF'
+[user]
+	name = Some Name
+	email = work@example-employer.com
+[pull]
+	rebase = true
+EOF
 
   cat >"$FAKE_HOME/.local/share/applications/ChatGPT.desktop" <<'EOF'
 [Desktop Entry]
@@ -94,4 +100,12 @@ EOF
   [ -f "$WORKDIR/dotfiles/.config/waybar/config.jsonc" ]
   grep -q '"custom": true' "$WORKDIR/dotfiles/.config/waybar/config.jsonc"
   [ -f "$WORKDIR/dotfiles/.config/git/config" ]
+}
+
+@test "git/config exportado nunca leva name/email (repo público) mas mantém o resto" {
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  ! grep -q "Some Name" "$WORKDIR/dotfiles/.config/git/config"
+  ! grep -q "work@example-employer.com" "$WORKDIR/dotfiles/.config/git/config"
+  grep -q "rebase = true" "$WORKDIR/dotfiles/.config/git/config"
 }
