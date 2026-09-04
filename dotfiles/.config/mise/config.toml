@@ -1,7 +1,11 @@
 [tools]
+claude = "latest"
+codex = "latest"
 dotnet = "latest"
+go = "latest"
 java = "17.0.0"
 node = "latest"
+opencode = "latest"
 ruby = "latest"
 
 [settings]

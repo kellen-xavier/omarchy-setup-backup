@@ -1,10 +1,28 @@
-# Extra AUR packages (installed with yay) — best-effort guess from ~/.config,
-# NOT authoritative. Run export.sh on the real machine to regenerate.
-google-chrome
-opera
-slack-desktop
-sublime-text-4
-insomnia-bin
+ai-jail
+ai-memory-bin
+ai-usagebar-bin
+android-studio
 bitwarden-bin
-duckstation
+claudebar
+clock-tui-bin
+dbeaver-ce-bin
+gamemaker-beta-bin
+gamemaker-steamruntime-sdk-bin
+gconf
+gimp-2
+google-chrome
+green-recorder
+gtk2
+hyprmoncfg
+insomnia
+lidarr-bin
+linuxdeploy-appimage
+mangaplus-reader-bin
+obsolete-appimagetool-bin
+opera
+proton-vpn-browser-extension
+prowlarr-bin
+rider
+slack-desktop
+timeshift-autosnap
 unityhub

@@ -43,14 +43,17 @@ video/x-ms-asf=mpv.desktop
 video/x-ogm+ogg=mpv.desktop
 video/x-theora+ogg=mpv.desktop
 application/ogg=mpv.desktop
-x-scheme-handler/mailto=google-chrome.desktop
+x-scheme-handler/mailto=HEY.desktop
 inode/directory=org.gnome.Nautilus.desktop
 x-scheme-handler/slack=slack.desktop
 x-scheme-handler/claude-cli=claude-code-url-handler.desktop
 x-scheme-handler/insomnia=insomnia.desktop
 application/epub+zip=calibre-gui.desktop
+x-scheme-handler/jetbrains=jetbrainsd.desktop
+x-scheme-handler/bitwarden=bitwarden.desktop
 
 [Added Associations]
 text/plain=sublime_text.desktop;
 application/epub+zip=calibre-gui.desktop;
 application/pdf=org.gnome.Evince.desktop;
+x-scheme-handler/bitwarden=bitwarden.desktop;
