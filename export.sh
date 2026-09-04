@@ -75,6 +75,12 @@ mkdir -p dotfiles/.config/git
     fi
   done
 )
+
+# omarchy/plugins/<id> (from `omarchy plugin clone`) are themselves git repos.
+# Left as-is, git would track them as gitlinks (submodule references) instead
+# of real content — this repo has no .gitmodules, so those would silently
+# restore to nothing. Strip the nested .git so they're backed up as plain files.
+find dotfiles -mindepth 2 -type d -name ".git" -exec rm -rf {} +
 if [ -e "$HOME/.config/git/config" ]; then
   # This repo is public: never let [user] name/email (often a work address)
   # leak into it. Everything else in the config (aliases, [pull], [diff]...)

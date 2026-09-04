@@ -1,0 +1,50 @@
+#!/bin/bash
+# Read or atomically write ThemeBook config JSON.
+
+set -euo pipefail
+
+CONFIG_DIR=$HOME/.config/omarchy
+CONFIG=$CONFIG_DIR/themebook.json
+MAX_CONFIG_BYTES=262144
+
+mkdir -p "$CONFIG_DIR"
+
+case ${1:-} in
+  path)
+    printf '%s\n' "$CONFIG"
+    ;;
+  stamp)
+    stat -c '%s:%Y' "$CONFIG" 2>/dev/null || printf 'missing\n'
+    ;;
+  read)
+    if [[ ! -f $CONFIG ]]; then
+      printf '%s\n' '{}'
+      exit 0
+    fi
+    size=$(stat -c%s "$CONFIG" 2>/dev/null || echo 0)
+    if (( size > MAX_CONFIG_BYTES )); then
+      printf '%s\n' '{}'
+      exit 0
+    fi
+    head -c "$MAX_CONFIG_BYTES" "$CONFIG"
+    ;;
+  write)
+    json=${2-}
+    if [[ -z $json ]]; then
+      json=$(cat)
+    fi
+    if (( ${#json} > MAX_CONFIG_BYTES )); then
+      echo "config write: JSON too large" >&2
+      exit 1
+    fi
+    printf '%s' "$json" | jq -e 'type == "object"' >/dev/null
+    tmp=$(mktemp "$CONFIG_DIR/themebook.json.XXXXXX")
+    printf '%s\n' "$json" >"$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$CONFIG"
+    ;;
+  *)
+    echo "Usage: config read|write|path|stamp [json]" >&2
+    exit 1
+    ;;
+esac

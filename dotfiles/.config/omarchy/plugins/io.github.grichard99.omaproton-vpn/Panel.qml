@@ -1,0 +1,1221 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+import "Model.js" as Model
+
+Panel {
+  id: root
+  moduleName: "io.github.grichard99.omaproton-vpn"
+  ipcTarget: "io.github.grichard99.omaproton-vpn"
+  manageIpc: false
+
+  // One keyboard cursor walks every section top to bottom. Each section has a
+  // name, a row count, and its own index property; sectionList() says which
+  // ones exist right now.
+  property string focusSection: "header"
+  property int nudgeIndex: 0
+  property int quickIndex: 0
+  property int protectionIndex: 0
+  property int recentIndex: 0
+  property int countryIndex: 0
+  property int serverIndex: 0
+  property bool cursorActive: false
+  property string filterQuery: ""
+
+  // Drilled into one country's server list rather than the country list.
+  readonly property bool drilled: vpn.serversCountry !== ""
+  // Row 0 inside a drill is "Fastest in <country>"; real servers follow it.
+  readonly property int serverRowCount: drilled ? vpn.servers.length + 1 : 0
+
+  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+
+  readonly property color iconColor: vpn.connected ? foreground : dim
+  readonly property color barIconColor: vpn.connected ? barForeground : Qt.darker(barForeground, 1.55)
+
+  readonly property var quickActions: [
+    { key: "fastest", label: "Fastest", hint: "Best server for your location", plus: false },
+    { key: "random", label: "Random", hint: "Any available server", plus: false },
+    { key: "p2p", label: "P2P", hint: "Optimized for file sharing", plus: true },
+    { key: "securecore", label: "Secure Core", hint: "Route via a privacy-friendly country", plus: true },
+    { key: "tor", label: "Tor", hint: "Tor over VPN", plus: true }
+  ]
+
+  readonly property var filteredCountries: Model.filterCountries(vpn.countries, filterQuery)
+
+  // Offered once, until turned on or dismissed. The CLI ships with the kill
+  // switch off, which means a dropped tunnel silently exposes the user.
+  readonly property bool nudgeVisible: vpn.signedIn && vpn.configLoaded && vpn.stateLoaded
+                                       && !vpn.killSwitchOn && !vpn.nudgeDismissed
+
+  readonly property string heroMeta: {
+    if (!vpn.installed) return vpn.installing ? "Installing…" : "Not installed"
+    if (vpn.busy && vpn.pendingLabel !== "") return vpn.pendingLabel
+    if (vpn.connected) {
+      var server = vpn.displayServer
+      return server !== "" ? server : "Protected"
+    }
+    if (!vpn.accountProbed) return "Checking…"
+    if (!vpn.signedIn) return "Signed out"
+    return "Not protected"
+  }
+
+  readonly property string toggleHint: vpn.connected ? "Disconnect" : "Connect to fastest server"
+
+  function runQuick(key) {
+    if (key === "fastest") vpn.connectFastest()
+    else if (key === "random") vpn.connectRandom()
+    else if (key === "p2p") vpn.connectP2P()
+    else if (key === "securecore") vpn.connectSecureCore()
+    else if (key === "tor") vpn.connectTor()
+  }
+
+  function sectionList() {
+    if (!vpn.installed) return [{ name: "install", count: 1 }]
+    if (!vpn.signedIn) return [{ name: "signin", count: 1 }]
+    var list = [{ name: "header", count: 1 }]
+    if (nudgeVisible) list.push({ name: "nudge", count: 2 })
+    list.push({ name: "quick", count: quickActions.length })
+    list.push({ name: "protection", count: 2 })
+    if (vpn.recents.length > 0) list.push({ name: "recents", count: vpn.recents.length })
+    if (drilled) list.push({ name: "servers", count: serverRowCount })
+    else if (filteredCountries.length > 0) list.push({ name: "countries", count: filteredCountries.length })
+    return list
+  }
+
+  function sectionIndex(name) {
+    if (name === "nudge") return nudgeIndex
+    if (name === "quick") return quickIndex
+    if (name === "protection") return protectionIndex
+    if (name === "recents") return recentIndex
+    if (name === "countries") return countryIndex
+    if (name === "servers") return serverIndex
+    return 0
+  }
+
+  function setSectionIndex(name, value) {
+    if (name === "nudge") nudgeIndex = value
+    else if (name === "quick") quickIndex = value
+    else if (name === "protection") protectionIndex = value
+    else if (name === "recents") recentIndex = value
+    else if (name === "countries") countryIndex = value
+    else if (name === "servers") serverIndex = value
+  }
+
+  // Keep the cursor on a section that exists, with an index inside its rows.
+  function ensureCursor() {
+    var list = sectionList()
+    var pos = -1
+    for (var i = 0; i < list.length; i++) if (list[i].name === focusSection) pos = i
+    if (pos === -1) {
+      // Countries and servers stand in for each other across a drill.
+      if (focusSection === "countries" && drilled) focusSection = "servers"
+      else if (focusSection === "servers" && !drilled) focusSection = "countries"
+      else focusSection = list[0].name
+      for (i = 0; i < list.length; i++) if (list[i].name === focusSection) pos = i
+      if (pos === -1) { focusSection = list[0].name; pos = 0 }
+    }
+    var count = list[pos].count
+    setSectionIndex(focusSection, Math.max(0, Math.min(count - 1, sectionIndex(focusSection))))
+  }
+
+  function drillInto(country) {
+    if (!country) return
+    cursorActive = true
+    vpn.loadServers(country.code, country.name)
+    focusSection = "servers"
+    serverIndex = 0
+    Qt.callLater(function() {
+      if (panelFlick && countrySection) panelFlick.contentY = Math.min(root.maxScroll(), countrySection.y)
+    })
+  }
+
+  function drillOut() {
+    vpn.clearServers()
+    focusSection = "countries"
+    serverIndex = 0
+  }
+
+  function moveCursor(dx, dy) {
+    cursorActive = true
+    ensureCursor()
+
+    // Horizontal moves drill in and out of a country's server list.
+    if (dx !== 0) {
+      if (dx > 0 && focusSection === "countries") drillInto(filteredCountries[countryIndex])
+      else if (dx < 0 && focusSection === "servers") drillOut()
+      return
+    }
+    if (dy === 0) return
+
+    var list = sectionList()
+    var pos = 0
+    for (var i = 0; i < list.length; i++) if (list[i].name === focusSection) pos = i
+    var next = sectionIndex(focusSection) + dy
+
+    if (next < 0) {
+      if (pos === 0) return
+      focusSection = list[pos - 1].name
+      setSectionIndex(focusSection, list[pos - 1].count - 1)
+    } else if (next >= list[pos].count) {
+      if (pos === list.length - 1) return
+      focusSection = list[pos + 1].name
+      setSectionIndex(focusSection, 0)
+    } else {
+      setSectionIndex(focusSection, next)
+    }
+    if (focusSection === "header") { if (panelFlick) panelFlick.contentY = 0 }
+    else scrollCursorIntoView()
+  }
+
+  function activateCursor() {
+    ensureCursor()
+    if (focusSection === "install") vpn.installCli()
+    else if (focusSection === "signin") submitSignIn()
+    else if (focusSection === "header") vpn.toggle()
+    else if (focusSection === "nudge") { if (nudgeIndex === 0) vpn.toggleKillSwitch(); else vpn.dismissNudge() }
+    else if (focusSection === "quick") runQuick(quickActions[quickIndex].key)
+    else if (focusSection === "protection") { if (protectionIndex === 0) vpn.toggleKillSwitch(); else vpn.toggleNetShield() }
+    else if (focusSection === "recents") { vpn.connectRecent(recentIndex); showConnection() }
+    // Enter on a country opens its servers rather than connecting blind —
+    // the first row inside is still "Fastest in <country>", so the old
+    // one-keystroke behaviour is only ever one row away.
+    else if (focusSection === "countries") drillInto(filteredCountries[countryIndex])
+    else if (focusSection === "servers") activateServerRow(serverIndex)
+  }
+
+  function activateServerRow(index) {
+    if (index <= 0) {
+      vpn.connectCountry(vpn.serversCountry, vpn.serversCountryName)
+    } else {
+      var s = vpn.servers[index - 1]
+      if (!s) return
+      vpn.connectServer(s.name, s.city, vpn.serversCountryName)
+    }
+    showConnection()
+  }
+
+  // Empty field: put the cursor in it rather than opening a terminal that
+  // would only ask the same question.
+  function submitSignIn() {
+    var u = String(usernameField.text || "").trim()
+    if (u === "") { usernameField.forceActiveFocus(); return }
+    if (vpn.signIn(u)) keyCatcher.forceActiveFocus()
+  }
+
+  function maxScroll() {
+    return panelFlick ? Math.max(0, panelFlick.contentHeight - panelFlick.height) : 0
+  }
+
+  // After picking a place to connect to, bring the map and connection
+  // details back into view — that's what the person wants to watch next.
+  function showConnection() {
+    cursorActive = false
+    focusSection = "header"
+    if (panelFlick) panelFlick.contentY = 0
+  }
+
+  function setCursor(section, index) {
+    cursorActive = true
+    focusSection = section
+    setSectionIndex(section, index)
+  }
+
+  function setHeaderCursor() {
+    setCursor("header", 0)
+    if (panelFlick) panelFlick.contentY = 0
+  }
+
+  function scrollItemIntoView(item) {
+    if (!panelFlick || !item) return
+    Qt.callLater(function() {
+      if (!item) return
+      var margin = Style.space(6)
+      var point = item.mapToItem(panelFlick.contentItem, 0, 0)
+      var top = point.y
+      var bottom = top + item.height
+      var viewTop = panelFlick.contentY
+      var viewBottom = viewTop + panelFlick.height
+      var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+      if (top < viewTop + margin) panelFlick.contentY = Math.max(0, top - margin)
+      else if (bottom > viewBottom - margin) panelFlick.contentY = Math.min(maxY, bottom + margin - panelFlick.height)
+    })
+  }
+
+  function scrollCursorIntoView() {
+    var column = null
+    if (focusSection === "nudge") column = nudgeButtons
+    else if (focusSection === "quick") column = quickColumn
+    else if (focusSection === "protection") column = protectionColumn
+    else if (focusSection === "recents") column = recentColumn
+    else if (focusSection === "countries") column = countryColumn
+    else if (focusSection === "servers") column = serverColumn
+    var i = sectionIndex(focusSection)
+    if (column && i >= 0 && i < column.children.length) scrollItemIntoView(column.children[i])
+  }
+
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  onOpenedChanged: {
+    vpn.panelOpen = opened
+    if (opened) {
+      cursorActive = false
+      filterQuery = ""
+      vpn.clearServers()
+      serverIndex = 0
+      if (panelFlick) panelFlick.contentY = 0
+      ensureCursor()
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    }
+  }
+
+  Service {
+    id: vpn
+    settings: root.settings
+  }
+
+  Connections {
+    target: vpn
+    function onSignedInChanged() { root.ensureCursor() }
+    function onInstalledChanged() { root.ensureCursor() }
+    function onCountriesChanged() { root.ensureCursor() }
+  }
+
+  IpcHandler {
+    target: root.ipcTarget
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function connect(): string { vpn.connectFastest(); return "ok" }
+    function disconnect(): string { vpn.disconnect(); return "ok" }
+    function refresh(): string { vpn.refresh(); return "ok" }
+    // Load one country's city list without opening the panel — opening it
+    // steals keyboard focus, and a stray Space/Enter would connect somewhere.
+    function servers(code: string): string {
+      vpn.loadServers(code, code)
+      return "ok"
+    }
+    function status(): string { return vpn.displayStatus + (vpn.displayServer !== "" ? " — " + vpn.displayServer : "") }
+    // Deliberately omits the account email: anything running as this user can
+    // call IPC, and the panel is the only place it should be readable.
+    function debug(): string {
+      return JSON.stringify({
+        installed: vpn.installed,
+        gtkAppInstalled: vpn.gtkAppInstalled,
+        accountProbed: vpn.accountProbed,
+        signedIn: vpn.signedIn,
+        connected: vpn.connected,
+        busy: vpn.busy,
+        killSwitch: vpn.config["kill-switch"] || "",
+        netshield: vpn.config["netshield"] || "",
+        countries: vpn.countries.length,
+        recents: vpn.recents.length,
+        cities: vpn.cities.length,
+        currentPlace: vpn.currentPlace ? vpn.currentPlace.city + ", " + vpn.currentPlace.code : "",
+        stateLoaded: vpn.stateLoaded,
+        nudgeDismissed: vpn.nudgeDismissed,
+        drilledInto: vpn.serversCountry,
+        servers: vpn.servers.length,
+        lastError: vpn.lastError
+      })
+    }
+  }
+
+  BarIconButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    iconComponent: Component {
+      Item {
+        ProtonIcon {
+          anchors.centerIn: parent
+          // The Proton mark is a solid triangle that fills its box corner to
+          // corner, so it reads larger than the neighbouring glyphs at equal
+          // size — trimmed to sit level with them.
+          iconSize: Style.space(11)
+          color: root.barIconColor
+          opacity: vpn.connected ? 1.0 : 0.6
+        }
+      }
+    }
+    onPressed: function(buttonCode) {
+      if (buttonCode === Qt.RightButton) vpn.toggle()
+      else if (buttonCode === Qt.MiddleButton) vpn.refresh()
+      else root.toggle()
+    }
+  }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(360))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(580))
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      // A text field owns the keyboard while it has focus, otherwise every
+      // letter typed would drive the cursor instead of the input.
+      blocked: filterField.activeFocus || usernameField.activeFocus
+      onMoveRequested: function(dx, dy) {
+        if (!root.cursorActive) { root.cursorActive = true; return }
+        root.moveCursor(dx, dy)
+      }
+      onActivateRequested: if (root.cursorActive) root.activateCursor()
+      // Inside a drill, escape backs out one level before it closes the panel.
+      onCloseRequested: root.drilled ? root.drillOut() : root.close()
+      onTabRequested: function(direction) { root.switchPanel(direction) }
+      // No single-letter actions on purpose: the panel takes keyboard focus
+      // when it opens, and a stray keystroke must never change the tunnel.
+      onTextKey: function(t) {
+        if (t === "/") filterField.forceActiveFocus()
+      }
+
+      Flickable {
+        id: panelFlick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        // Fixed steps instead of Flickable's momentum: one wheel notch moves
+        // about a row and a half, touchpads scroll by their pixel delta, and
+        // the content never overshoots or coasts.
+        WheelHandler {
+          target: null
+          acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+          onWheel: function(event) {
+            var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : (event.angleDelta.y / 120) * Style.space(72)
+            panelFlick.contentY = Math.max(0, Math.min(root.maxScroll(), panelFlick.contentY - dy))
+            event.accepted = true
+          }
+        }
+
+        Column {
+          id: column
+          width: panelFlick.width
+          spacing: Style.space(12)
+
+          Item {
+            id: header
+            width: parent.width
+            implicitHeight: hero.implicitHeight
+            // The hero's trailingControl resolves `root` to PanelHero, so
+            // panel state is reached through `header` instead.
+            readonly property bool ringVisible: root.cursorActive && root.focusSection === "header"
+            function focusHero() { root.setHeaderCursor() }
+
+            PanelHero {
+              id: hero
+              width: parent.width
+              title: "OmaProton VPN"
+              meta: root.heroMeta
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              iconOpacity: vpn.connected ? 1.0 : 0.5
+              iconComponent: Component {
+                ProtonIcon {
+                  iconSize: Style.font.display
+                  color: root.iconColor
+                }
+              }
+
+              trailingControl: Component {
+                ToggleSwitch {
+                  id: powerSwitch
+                  // A live tunnel is enough to show the switch: you can always
+                  // disconnect, even if the account probe hasn't landed.
+                  visible: vpn.installed && (vpn.signedIn || vpn.connected)
+                  checked: vpn.connected
+                  busy: vpn.busy
+                  hasCursor: header.ringVisible
+                  foreground: hero.foreground
+                  onHovered: function(on) { if (on) header.focusHero() }
+                  onToggled: vpn.toggle()
+
+                  PanelToolTip {
+                    visible: powerSwitch.containsMouse
+                    text: root.toggleHint
+                    fontFamily: hero.fontFamily
+                  }
+                }
+              }
+            }
+          }
+
+          // ── Map ─────────────────────────────────────────────────────────
+          WorldMap {
+            visible: vpn.signedIn && vpn.cities.length > 0
+            width: parent.width
+            cities: vpn.cities
+            current: vpn.currentPlace
+            connected: vpn.connected
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onCityClicked: function(c) {
+              root.drillInto({ code: c.code, name: vpn.countryName(c.code) })
+            }
+          }
+
+          Text {
+            visible: vpn.actionStatus !== "" || vpn.lastError !== ""
+            width: parent.width
+            text: vpn.actionStatus !== "" ? vpn.actionStatus : vpn.lastError
+            color: vpn.lastError !== "" && vpn.actionStatus === "" ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          // ── First run: the CLI isn't there yet ──────────────────────────
+          Column {
+            visible: !vpn.installed
+            width: parent.width
+            spacing: Style.space(8)
+
+            ActionRow {
+              width: parent.width
+              hasCursor: root.cursorActive && root.focusSection === "install"
+              icon: "󰇚"
+              title: vpn.installing ? "Installing Proton VPN CLI…" : "Install Proton VPN CLI"
+              subtitle: vpn.installing ? "Finish the install in the terminal that opened" : "Opens a terminal — Omarchy handles the install"
+              enabled: !vpn.installing
+              onEntered: root.setCursor("install", 0)
+              onClicked: vpn.installCli()
+            }
+
+            Text {
+              width: parent.width
+              text: "You'll also need a Proton account. A free one works — sign up at proton.me if you don't have one yet."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+          }
+
+          // The GTK app and the CLI can't both run; say so before connect fails.
+          Text {
+            visible: vpn.gtkAppInstalled
+            width: parent.width
+            text: "The Proton VPN desktop app is installed. It can't run alongside the CLI this widget uses — quit the app before connecting, or remove it with:  omarchy pkg drop proton-vpn-gtk-app"
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          // ── Sign in ─────────────────────────────────────────────────────
+          Column {
+            // Held back until the account probe lands, and never shown over a
+            // live tunnel — a connection is proof the session is valid.
+            visible: vpn.installed && vpn.accountProbed && !vpn.signedIn && !vpn.connected
+            width: parent.width
+            spacing: Style.space(8)
+
+            TextField {
+              id: usernameField
+              width: parent.width
+              foreground: root.foreground
+              placeholderText: "Proton username or email"
+              Keys.onEscapePressed: function(event) {
+                keyCatcher.forceActiveFocus()
+                event.accepted = true
+              }
+              Keys.onReturnPressed: function(event) {
+                root.submitSignIn()
+                event.accepted = true
+              }
+            }
+
+            ActionRow {
+              width: parent.width
+              hasCursor: root.cursorActive && root.focusSection === "signin"
+              icon: "󰌆"
+              title: "Sign in with Proton"
+              subtitle: "Opens a terminal for your password and 2FA code"
+              onEntered: root.setCursor("signin", 0)
+              onClicked: root.submitSignIn()
+            }
+          }
+
+          // ── Connection detail ───────────────────────────────────────────
+          // Server and location are promoted out of the status parse;
+          // everything else the CLI printed (Load, Protocol, …) is rendered
+          // as-is.
+          Column {
+            visible: vpn.connected
+            width: parent.width
+            spacing: Style.spacing.labelGap
+
+            InfoPair { label: "Server"; value: vpn.displayServer }
+            InfoPair { visible: vpn.location !== ""; label: "Location"; value: vpn.location }
+
+            Repeater {
+              model: vpn.fields
+              InfoPair {
+                required property var modelData
+                label: modelData.label
+                value: modelData.value
+              }
+            }
+          }
+
+          Column {
+            visible: vpn.signedIn && vpn.account !== ""
+            width: parent.width
+            spacing: Style.spacing.labelGap
+            InfoPair { label: "Account"; value: vpn.account }
+            InfoPair { visible: vpn.plan !== ""; label: "Plan"; value: vpn.plan }
+          }
+
+          // ── Kill-switch nudge ───────────────────────────────────────────
+          BorderSurface {
+            visible: root.nudgeVisible
+            width: parent.width
+            implicitHeight: nudgeContent.implicitHeight + Style.space(20)
+            radius: Style.cornerRadius
+            color: Style.controlFill(false, false, root.foreground, Color.accent)
+            borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+
+            Column {
+              id: nudgeContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(10)
+              anchors.rightMargin: Style.space(10)
+              spacing: Style.space(6)
+
+              Text {
+                width: parent.width
+                text: "Turn on the Kill Switch?"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.WordWrap
+              }
+
+              Text {
+                width: parent.width
+                text: "If the VPN ever drops, your internet is blocked until it's back — so you're never exposed without noticing. Recommended."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              Row {
+                id: nudgeButtons
+                spacing: Style.space(8)
+
+                Button {
+                  text: vpn.configBusy ? "Turning on…" : "Turn on"
+                  bordered: true
+                  foreground: root.foreground
+                  hasCursor: root.cursorActive && root.focusSection === "nudge" && root.nudgeIndex === 0
+                  enabled: !vpn.configBusy
+                  onClicked: vpn.toggleKillSwitch()
+                }
+
+                Button {
+                  text: "Not now"
+                  foreground: root.dim
+                  hasCursor: root.cursorActive && root.focusSection === "nudge" && root.nudgeIndex === 1
+                  onClicked: vpn.dismissNudge()
+                }
+              }
+            }
+          }
+
+          PanelSeparator {
+            visible: vpn.signedIn
+            foreground: root.foreground
+          }
+
+          // ── Quick connect ───────────────────────────────────────────────
+          Column {
+            visible: vpn.signedIn
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              text: "QUICK CONNECT"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Column {
+              id: quickColumn
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.quickActions
+                ActionRow {
+                  required property var modelData
+                  required property int index
+                  width: quickColumn.width
+                  hasCursor: root.cursorActive && root.focusSection === "quick" && root.quickIndex === index
+                  title: modelData.label
+                  subtitle: modelData.hint
+                  trailing: modelData.plus ? "PLUS" : ""
+                  enabled: !vpn.busy
+                  onEntered: root.setCursor("quick", index)
+                  onClicked: root.runQuick(modelData.key)
+                }
+              }
+            }
+          }
+
+          PanelSeparator {
+            visible: vpn.signedIn
+            foreground: root.foreground
+          }
+
+          // ── Protection ──────────────────────────────────────────────────
+          Column {
+            visible: vpn.signedIn
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              text: "PROTECTION"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Column {
+              id: protectionColumn
+              width: parent.width
+              spacing: Style.space(6)
+
+              Toggle {
+                width: parent.width
+                label: "Kill Switch"
+                description: vpn.configLoaded ? "Block internet if the VPN drops" : "Loading…"
+                checked: vpn.killSwitchOn
+                enabled: vpn.configLoaded && !vpn.configBusy
+                hasCursor: root.cursorActive && root.focusSection === "protection" && root.protectionIndex === 0
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onHovered: function(on) { if (on) root.setCursor("protection", 0) }
+                onClicked: vpn.toggleKillSwitch()
+              }
+
+              Toggle {
+                width: parent.width
+                label: "NetShield"
+                description: {
+                  if (!vpn.configLoaded) return "Loading…"
+                  var v = String(vpn.config["netshield"] || "off")
+                  if (v === "malware-ads-trackers") return "Blocking malware, ads and trackers"
+                  if (v === "malware-only") return "Blocking malware"
+                  return "Block malware, ads and trackers"
+                }
+                checked: vpn.netShieldOn
+                enabled: vpn.configLoaded && !vpn.configBusy
+                hasCursor: root.cursorActive && root.focusSection === "protection" && root.protectionIndex === 1
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onHovered: function(on) { if (on) root.setCursor("protection", 1) }
+                onClicked: vpn.toggleNetShield()
+              }
+            }
+          }
+
+          PanelSeparator {
+            visible: vpn.signedIn && vpn.recents.length > 0
+            foreground: root.foreground
+          }
+
+          // ── Recent ──────────────────────────────────────────────────────
+          Column {
+            visible: vpn.signedIn && vpn.recents.length > 0
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              text: "RECENT"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Column {
+              id: recentColumn
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: vpn.recents
+                ActionRow {
+                  required property var modelData
+                  required property int index
+                  width: recentColumn.width
+                  hasCursor: root.cursorActive && root.focusSection === "recents" && root.recentIndex === index
+                  title: modelData.title || ""
+                  subtitle: modelData.subtitle || ""
+                  enabled: !vpn.busy
+                  onEntered: root.setCursor("recents", index)
+                  onClicked: { vpn.connectRecent(index); root.showConnection() }
+                }
+              }
+            }
+          }
+
+          PanelSeparator {
+            visible: vpn.signedIn
+            foreground: root.foreground
+          }
+
+          // ── Countries / cities ──────────────────────────────────────────
+          Column {
+            id: countrySection
+            visible: vpn.signedIn
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              text: root.drilled ? String(vpn.serversCountryName).toUpperCase() : "COUNTRIES"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            BackRow {
+              visible: root.drilled
+              width: parent.width
+            }
+
+            Text {
+              visible: root.drilled && vpn.serversLoading
+              width: parent.width
+              text: "Loading servers…"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            Column {
+              id: serverColumn
+              visible: root.drilled && !vpn.serversLoading
+              width: parent.width
+              spacing: Style.space(6)
+
+              FastestRow { width: serverColumn.width }
+
+              Repeater {
+                model: vpn.servers
+                ServerRow {
+                  required property var modelData
+                  required property int index
+                  width: serverColumn.width
+                  server: modelData
+                  // Row 0 is "Fastest in <country>", so servers start at 1.
+                  rowIndex: index + 1
+                }
+              }
+            }
+
+            TextField {
+              id: filterField
+              visible: !root.drilled
+              width: parent.width
+              foreground: root.foreground
+              placeholderText: vpn.countriesLoaded ? "Filter countries  (press /)" : "Loading countries…"
+              enabled: vpn.countriesLoaded
+              text: root.filterQuery
+              onTextChanged: {
+                root.filterQuery = text
+                root.countryIndex = 0
+              }
+              Keys.onEscapePressed: function(event) {
+                if (text !== "") text = ""
+                keyCatcher.forceActiveFocus()
+                event.accepted = true
+              }
+              Keys.onReturnPressed: function(event) {
+                var c = root.filteredCountries[0]
+                if (c) {
+                  vpn.connectCountry(c.code, c.name)
+                  keyCatcher.forceActiveFocus()
+                  root.showConnection()
+                }
+                event.accepted = true
+              }
+            }
+
+            Text {
+              visible: !root.drilled && vpn.countriesLoaded && root.filteredCountries.length === 0
+              width: parent.width
+              text: "No countries match."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            Column {
+              id: countryColumn
+              visible: !root.drilled
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.filteredCountries
+                CountryRow {
+                  required property var modelData
+                  required property int index
+                  width: countryColumn.width
+                  country: modelData
+                  rowIndex: index
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // A clickable row: optional icon, title + subtitle, optional trailing tag.
+  // Used for install, sign-in, quick connect, and recents so they all read
+  // the same way.
+  component ActionRow: CursorSurface {
+    id: actionRow
+    property string icon: ""
+    property string title: ""
+    property string subtitle: ""
+    property string trailing: ""
+    signal entered()
+    signal clicked()
+
+    foreground: root.foreground
+    implicitHeight: actionContent.implicitHeight + Style.spacing.rowPaddingX
+    opacity: enabled ? 1.0 : 0.6
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: actionRow.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+      enabled: actionRow.enabled
+      onEntered: actionRow.entered()
+      onClicked: actionRow.clicked()
+    }
+
+    RowLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+
+      Text {
+        visible: actionRow.icon !== ""
+        text: actionRow.icon
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.heading
+        Layout.alignment: Qt.AlignVCenter
+      }
+
+      ColumnLayout {
+        id: actionContent
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          text: actionRow.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+
+        Text {
+          Layout.fillWidth: true
+          visible: actionRow.subtitle !== ""
+          text: actionRow.subtitle
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      Text {
+        visible: actionRow.trailing !== ""
+        text: actionRow.trailing
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        Layout.alignment: Qt.AlignVCenter
+      }
+    }
+  }
+
+  component CountryRow: CursorSurface {
+    id: countryRow
+    property var country: null
+    property int rowIndex: 0
+
+    readonly property bool isCurrent: vpn.connected && vpn.displayServer !== "" && country
+                                      && vpn.displayServer.toUpperCase().indexOf(String(country.code).toUpperCase()) === 0
+
+    hasCursor: root.cursorActive && root.focusSection === "countries" && root.countryIndex === rowIndex
+    foreground: root.foreground
+
+    implicitHeight: countryContent.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: vpn.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
+      enabled: !vpn.busy
+      onEntered: root.setCursor("countries", countryRow.rowIndex)
+      onClicked: root.drillInto(countryRow.country)
+    }
+
+    RowLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+
+      ColumnLayout {
+        id: countryContent
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          text: countryRow.country ? countryRow.country.name : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+      }
+
+      Text {
+        text: countryRow.isCurrent ? "󰄬" : (countryRow.country ? countryRow.country.code : "")
+        color: countryRow.isCurrent ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        Layout.alignment: Qt.AlignVCenter
+      }
+
+      // Signals that the row opens a server list rather than connecting.
+      Text {
+        text: "›"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        Layout.alignment: Qt.AlignVCenter
+      }
+    }
+  }
+
+  component BackRow: CursorSurface {
+    id: backRow
+    foreground: root.foreground
+    implicitHeight: backLabel.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.drillOut()
+    }
+
+    Text {
+      id: backLabel
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      text: "‹  All countries"
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+  }
+
+  // Row 0 of a drill: keeps the old one-click "fastest in this country" path.
+  component FastestRow: CursorSurface {
+    id: fastestRow
+    hasCursor: root.cursorActive && root.focusSection === "servers" && root.serverIndex === 0
+    foreground: root.foreground
+    implicitHeight: fastestContent.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: vpn.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
+      enabled: !vpn.busy
+      onEntered: root.setCursor("servers", 0)
+      onClicked: root.activateServerRow(0)
+    }
+
+    RowLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+
+      ColumnLayout {
+        id: fastestContent
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          text: "Fastest in " + vpn.serversCountryName
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: vpn.servers.length > 0 ? vpn.servers.length + (vpn.servers.length === 1 ? " city" : " cities") + " available" : "Let Proton choose"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+  }
+
+  component ServerRow: CursorSurface {
+    id: serverRow
+    property var server: null
+    property int rowIndex: 0
+
+    // The row stands for a city, so any server in that city counts as current —
+    // status reports "NL#42 in Amsterdam, Netherlands", so match on location.
+    readonly property bool isCurrent: vpn.connected && server
+                                      && (vpn.displayServer === server.name
+                                          || (server.city !== "" && String(vpn.location).indexOf(server.city) === 0))
+
+    hasCursor: root.cursorActive && root.focusSection === "servers" && root.serverIndex === rowIndex
+    foreground: root.foreground
+    implicitHeight: serverContent.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: vpn.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
+      enabled: !vpn.busy
+      onEntered: root.setCursor("servers", serverRow.rowIndex)
+      onClicked: if (serverRow.server) root.activateServerRow(serverRow.rowIndex)
+    }
+
+    RowLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+
+      ColumnLayout {
+        id: serverContent
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          Layout.fillWidth: true
+          text: serverRow.server ? serverRow.server.city : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: {
+            if (!serverRow.server) return ""
+            var bits = [serverRow.server.name]
+            // Tier 0 is Proton's free tier — the one thing a free user needs
+            // to know before clicking.
+            if (serverRow.server.tier === 0) bits.push("Free")
+            var tags = serverRow.server.tags || []
+            if (tags.length > 0) bits.push(tags.join(", "))
+            return bits.join(" · ")
+          }
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      Text {
+        text: serverRow.isCurrent ? "󰄬" : (serverRow.server && serverRow.server.load !== undefined && serverRow.server.load !== null ? serverRow.server.load + "%" : "")
+        color: {
+          if (serverRow.isCurrent) return root.foreground
+          var load = serverRow.server ? serverRow.server.load : 0
+          return load >= 85 ? root.urgent : root.dim
+        }
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        Layout.alignment: Qt.AlignVCenter
+      }
+    }
+  }
+
+  component InfoPair: Row {
+    property string label: ""
+    property string value: ""
+
+    width: parent.width
+    spacing: Style.space(8)
+
+    InfoLabel { text: label }
+    Item {
+      width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].implicitWidth - parent.spacing * 2)
+      height: 1
+    }
+    InfoValue { text: value }
+  }
+
+  component InfoLabel: Text {
+    color: root.foreground
+    opacity: 0.6
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.bodySmall
+  }
+
+  component InfoValue: Text {
+    color: root.foreground
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.bodySmall
+    elide: Text.ElideRight
+  }
+}

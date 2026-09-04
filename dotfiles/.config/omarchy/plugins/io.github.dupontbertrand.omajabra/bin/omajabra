@@ -1,0 +1,683 @@
+#!/usr/bin/env python3
+"""Small BlueZ/PipeWire backend for the Omajabra Omarchy plugin."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import re
+import selectors
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import omajabra_gnp
+
+
+VERSION = "0.1.0"
+ADDRESS_RE = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$", re.IGNORECASE)
+MAX_JSON_BYTES = 1024 * 1024
+MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
+
+
+class CommandOutputLimitExceeded(RuntimeError):
+    """A subprocess produced more output than we are willing to buffer."""
+DEVICE_RE = re.compile(
+    r"^Device\s+([0-9A-F]{2}(?::[0-9A-F]{2}){5})\s+(.+)$", re.IGNORECASE
+)
+TIMEOUT_SECONDS = 8
+
+
+class OmajabraError(RuntimeError):
+    """An expected, user-facing backend error."""
+
+
+def stop_process(process: "subprocess.Popen[bytes]") -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+    if process.poll() is None:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=1)
+
+
+def run_bounded(
+    command: list[str],
+    timeout: float = TIMEOUT_SECONDS,
+    output_limit: int = MAX_COMMAND_OUTPUT_BYTES,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command, bounding the combined stdout/stderr held in memory and
+    killing the whole process group on timeout or overflow. System tools have
+    bounded output in normal use; this stops a hostile or runaway one from
+    exhausting the long-lived status watcher."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    streams = {process.stdout: bytearray(), process.stderr: bytearray()}
+    selector = selectors.DefaultSelector()
+    for stream in streams:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    total = 0
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            events = selector.select(remaining)
+            if not events:
+                raise subprocess.TimeoutExpired(command, timeout)
+            for key, _mask in events:
+                stream = key.fileobj
+                chunk = os.read(stream.fileno(), min(65536, output_limit - total + 1))
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                streams[stream].extend(chunk)
+                total += len(chunk)
+                if total > output_limit:
+                    raise CommandOutputLimitExceeded(
+                        f"command output exceeded {output_limit} bytes"
+                    )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, timeout)
+        returncode = process.wait(timeout=remaining)
+    except BaseException:
+        stop_process(process)
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    stdout = streams[process.stdout].decode("utf-8", errors="replace")
+    stderr = streams[process.stderr].decode("utf-8", errors="replace")
+    return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+
+def run_command(arguments: list[str], timeout: int = TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    try:
+        return run_bounded(arguments, timeout)
+    except FileNotFoundError as error:
+        raise OmajabraError(f"{arguments[0]} is not installed") from error
+    except subprocess.TimeoutExpired as error:
+        raise OmajabraError(f"{arguments[0]} timed out") from error
+    except CommandOutputLimitExceeded as error:
+        raise OmajabraError(f"{arguments[0]} produced too much output") from error
+
+
+def read_json_file(path: Path) -> dict[str, Any]:
+    """Read a JSON object from a user-writable path without following symlinks
+    or blocking on a FIFO, and refuse anything but a regular file we own or an
+    oversized payload. Raises FileNotFoundError if the path is absent."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise ValueError(f"Cannot read {path}: {error}") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"Cannot read {path}: not a regular file")
+        if metadata.st_uid != os.getuid():
+            raise ValueError(f"Cannot read {path}: not owned by the current user")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_JSON_BYTES + 1)
+    except OSError as error:
+        raise ValueError(f"Cannot read {path}: {error}") from error
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_JSON_BYTES:
+        raise ValueError(f"{path} is limited to {MAX_JSON_BYTES} bytes")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"Cannot read {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise TypeError(f"{path} must contain a JSON object")
+    return value
+
+
+def command_output(arguments: list[str], timeout: int = TIMEOUT_SECONDS) -> str:
+    completed = run_command(arguments, timeout)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise OmajabraError(detail.splitlines()[-1] if detail else f"{arguments[0]} failed")
+    return completed.stdout
+
+
+def parse_devices(raw: str) -> list[dict[str, str]]:
+    devices: list[dict[str, str]] = []
+    for line in raw.splitlines():
+        match = DEVICE_RE.match(line.strip())
+        if not match:
+            continue
+        devices.append({"address": match.group(1).upper(), "name": match.group(2).strip()})
+    return devices
+
+
+def parse_properties(raw: str) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        properties[key.strip()] = value.strip()
+    return properties
+
+
+def parse_battery(value: str) -> int | None:
+    decimal = re.search(r"\((\d{1,3})\)", value)
+    if decimal:
+        return max(0, min(100, int(decimal.group(1))))
+    hexadecimal = re.search(r"0x([0-9a-f]+)", value, re.IGNORECASE)
+    if hexadecimal:
+        return max(0, min(100, int(hexadecimal.group(1), 16)))
+    plain = re.search(r"\b(\d{1,3})\b", value)
+    return max(0, min(100, int(plain.group(1)))) if plain else None
+
+
+def bluetooth_state() -> dict[str, Any]:
+    if not shutil.which("bluetoothctl"):
+        return {"available": False, "powered": False, "message": "bluetoothctl is not installed"}
+    listed = run_command(["bluetoothctl", "list"])
+    available = listed.returncode == 0 and "Controller " in listed.stdout
+    if not available:
+        return {"available": False, "powered": False, "message": "No Bluetooth adapter"}
+    shown = run_command(["bluetoothctl", "show"])
+    properties = parse_properties(shown.stdout)
+    powered = properties.get("Powered", "no").casefold() == "yes"
+    return {
+        "available": True,
+        "powered": powered,
+        "message": "Bluetooth ready" if powered else "Bluetooth is off",
+    }
+
+
+def merged_jabra_devices() -> list[dict[str, Any]]:
+    by_address: dict[str, dict[str, Any]] = {}
+    for selector, connected in (("Paired", False), ("Connected", True)):
+        completed = run_command(["bluetoothctl", "devices", selector])
+        if completed.returncode != 0:
+            continue
+        for row in parse_devices(completed.stdout):
+            if "jabra" not in row["name"].casefold():
+                continue
+            existing = by_address.setdefault(row["address"], {**row, "connected": False})
+            existing["name"] = row["name"]
+            if connected:
+                existing["connected"] = True
+    preferred = os.environ.get("OMAJABRA_DEVICE", "").strip().upper()
+    devices = list(by_address.values())
+    devices.sort(
+        key=lambda row: (
+            row["address"] != preferred if preferred else False,
+            not row["connected"],
+            row["name"].casefold(),
+        )
+    )
+    return devices
+
+
+def inspect_device(device: dict[str, Any]) -> dict[str, Any]:
+    completed = run_command(["bluetoothctl", "info", device["address"]])
+    properties = parse_properties(completed.stdout)
+    name = properties.get("Alias") or properties.get("Name") or device["name"]
+    connected = properties.get("Connected", "no").casefold() == "yes"
+    paired = properties.get("Paired", "yes").casefold() == "yes"
+    battery = parse_battery(properties.get("Battery Percentage", ""))
+    return {
+        **device,
+        "name": name,
+        "connected": connected,
+        "paired": paired,
+        "battery": battery,
+        "vendor": properties.get("Modalias", ""),
+    }
+
+
+def parse_quoted_property(raw: str, key: str) -> str:
+    match = re.search(rf'^\s*\*?\s*{re.escape(key)}\s*=\s*"([^"]*)"', raw, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def sink_id_for(status_raw: str, address: str) -> int | None:
+    underscored = re.escape(address.replace(":", "_"))
+    match = re.search(
+        rf"(?:^|\n)[^\n]*?\b(\d+)\.\s+bluez_output\.{underscored}\.[^\s]+",
+        status_raw,
+        re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else None
+
+
+def source_available(status_raw: str, address: str) -> bool:
+    forms = (re.escape(address), re.escape(address.replace(":", "_")))
+    return any(
+        re.search(rf"bluez_input\.{form}(?:\s|\.|$)", status_raw, re.IGNORECASE)
+        is not None
+        for form in forms
+    )
+
+
+def parse_pipewire_profiles(raw: str) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    pending = ""
+
+    def finish() -> None:
+        if isinstance(current.get("index"), int) and current.get("name"):
+            profiles.append(dict(current))
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Object:"):
+            finish()
+            current.clear()
+            pending = ""
+            continue
+        property_match = re.search(r"Param:Profile:(index|name|description|available|priority)", line)
+        if property_match:
+            pending = property_match.group(1)
+            continue
+        if not pending:
+            continue
+        integer = re.match(r"(?:Int|Id)\s+(\d+)", stripped)
+        string = re.match(r'String\s+"([^"]*)"', stripped)
+        if pending in {"index", "available", "priority"} and integer:
+            current[pending] = int(integer.group(1))
+            pending = ""
+        elif pending in {"name", "description"} and string:
+            current[pending] = string.group(1)
+            pending = ""
+    finish()
+    return profiles
+
+
+def preferred_profiles(device_id: int | None) -> dict[str, dict[str, Any] | None]:
+    result: dict[str, dict[str, Any] | None] = {"music": None, "calls": None}
+    if device_id is None or not shutil.which("pw-cli"):
+        return result
+    completed = run_command(["pw-cli", "enum-params", str(device_id), "EnumProfile"])
+    if completed.returncode != 0:
+        return result
+    profiles = [row for row in parse_pipewire_profiles(completed.stdout) if row.get("available") == 2]
+    music = [row for row in profiles if str(row.get("name", "")).startswith("a2dp-sink")]
+    calls = [
+        row for row in profiles if str(row.get("name", "")).startswith("headset-head-unit")
+    ]
+    if music:
+        result["music"] = max(music, key=lambda row: int(row.get("priority", 0)))
+    if calls:
+        result["calls"] = max(calls, key=lambda row: int(row.get("priority", 0)))
+    return result
+
+
+def pipewire_state(address: str, connected: bool) -> dict[str, Any]:
+    empty = {
+        "available": shutil.which("wpctl") is not None,
+        "sinkId": None,
+        "deviceId": None,
+        "activeOutput": False,
+        "volume": None,
+        "muted": False,
+        "codec": "",
+        "profile": "",
+        "profileMode": "",
+        "profiles": {"music": None, "calls": None},
+        "microphoneAvailable": False,
+    }
+    if not connected or not empty["available"]:
+        return empty
+    status = run_command(["wpctl", "status", "-n"])
+    if status.returncode != 0:
+        return empty
+    sink_id = sink_id_for(status.stdout, address)
+    has_source = source_available(status.stdout, address)
+    if sink_id is None:
+        return empty
+    empty["sinkId"] = sink_id
+    inspected = run_command(["wpctl", "inspect", str(sink_id)])
+    if inspected.returncode == 0:
+        codec = parse_quoted_property(inspected.stdout, "api.bluez5.codec")
+        profile = parse_quoted_property(inspected.stdout, "api.bluez5.profile")
+        device_id = parse_quoted_property(inspected.stdout, "device.id")
+        empty["codec"] = codec.upper()
+        empty["profile"] = profile
+        empty["profileMode"] = (
+            "music"
+            if profile.startswith("a2dp-sink")
+            else "calls"
+            if profile.startswith("headset-head-unit")
+            else ""
+        )
+        empty["microphoneAvailable"] = has_source and empty["profileMode"] == "calls"
+        if device_id.isdigit():
+            empty["deviceId"] = int(device_id)
+            empty["profiles"] = preferred_profiles(empty["deviceId"])
+    default = run_command(["wpctl", "inspect", "@DEFAULT_AUDIO_SINK@"])
+    if default.returncode == 0:
+        default_address = parse_quoted_property(default.stdout, "api.bluez5.address")
+        default_node = parse_quoted_property(default.stdout, "node.name")
+        empty["activeOutput"] = (
+            default_address.casefold() == address.casefold()
+            or address.replace(":", "_").casefold() in default_node.casefold()
+        )
+    volume = run_command(["wpctl", "get-volume", str(sink_id)])
+    if volume.returncode == 0:
+        match = re.search(r"Volume:\s*([0-9.]+)", volume.stdout)
+        if match:
+            empty["volume"] = max(0, min(100, round(float(match.group(1)) * 100)))
+        empty["muted"] = "[MUTED]" in volume.stdout
+    return empty
+
+
+def load_mock() -> dict[str, Any] | None:
+    explicit = os.environ.get("OMAJABRA_MOCK_FILE", "").strip()
+    if explicit:
+        path = Path(explicit)
+    else:
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+        path = config_home / "omajabra" / "mock.json"
+    try:
+        parsed = read_json_file(path)
+    except FileNotFoundError:
+        if explicit:
+            raise OmajabraError(f"Mock status file not found: {path}")
+        return None
+    except (ValueError, TypeError) as error:
+        raise OmajabraError(f"Invalid mock status: {error}") from error
+    parsed.setdefault("schemaVersion", 1)
+    parsed["checkedAt"] = int(time.time() * 1000)
+    return parsed
+
+
+def status_data() -> dict[str, Any]:
+    mocked = load_mock()
+    if mocked is not None:
+        return mocked
+    adapter = bluetooth_state()
+    base: dict[str, Any] = {
+        "schemaVersion": 1,
+        "adapterAvailable": adapter["available"],
+        "adapterPowered": adapter["powered"],
+        "paired": False,
+        "connected": False,
+        "address": "",
+        "name": "Jabra",
+        "battery": None,
+        "audioAvailable": shutil.which("wpctl") is not None,
+        "sinkId": None,
+        "deviceId": None,
+        "activeOutput": False,
+        "volume": None,
+        "muted": False,
+        "codec": "",
+        "profile": "",
+        "profileMode": "",
+        "profiles": {"music": None, "calls": None},
+        "microphoneAvailable": False,
+        "modalias": "",
+        "message": adapter["message"],
+        "checkedAt": int(time.time() * 1000),
+    }
+    if not adapter["available"] or not adapter["powered"]:
+        return base
+    devices = merged_jabra_devices()
+    if not devices:
+        base["message"] = "No paired Jabra device"
+        return base
+    device = inspect_device(devices[0])
+    base.update(
+        {
+            "paired": device["paired"],
+            "connected": device["connected"],
+            "address": device["address"],
+            "name": device["name"],
+            "battery": device["battery"],
+            "modalias": device["vendor"],
+        }
+    )
+    audio = pipewire_state(device["address"], device["connected"])
+    base.update(
+        {
+            "audioAvailable": audio["available"],
+            "sinkId": audio["sinkId"],
+            "deviceId": audio["deviceId"],
+            "activeOutput": audio["activeOutput"],
+            "volume": audio["volume"],
+            "muted": audio["muted"],
+            "codec": audio["codec"],
+            "profile": audio["profile"],
+            "profileMode": audio["profileMode"],
+            "profiles": audio["profiles"],
+            "microphoneAvailable": audio["microphoneAvailable"],
+        }
+    )
+    if not device["connected"]:
+        base["message"] = "Ready to connect"
+    elif audio["sinkId"] is None:
+        base["message"] = "Connected · audio profile unavailable"
+    elif audio["activeOutput"]:
+        base["message"] = "Connected · active output"
+    else:
+        base["message"] = "Connected"
+    return base
+
+
+def selected_status() -> dict[str, Any]:
+    status = status_data()
+    address = str(status.get("address", ""))
+    if not ADDRESS_RE.fullmatch(address):
+        raise OmajabraError("No paired Jabra device")
+    return status
+
+
+def require_sink(status: dict[str, Any]) -> str:
+    sink_id = status.get("sinkId")
+    if not status.get("connected") or not isinstance(sink_id, int):
+        raise OmajabraError("Jabra audio output is unavailable")
+    return str(sink_id)
+
+
+def action_result(arguments: list[str], success: str) -> dict[str, Any]:
+    completed = run_command(arguments, timeout=20)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"{arguments[0]} failed"
+        raise OmajabraError(detail.splitlines()[-1])
+    return {"ok": True, "message": success}
+
+
+def command_connect(_args: argparse.Namespace) -> dict[str, Any]:
+    status = selected_status()
+    return action_result(["bluetoothctl", "connect", status["address"]], "Connected")
+
+
+def command_disconnect(_args: argparse.Namespace) -> dict[str, Any]:
+    status = selected_status()
+    return action_result(["bluetoothctl", "disconnect", status["address"]], "Disconnected")
+
+
+def command_activate(_args: argparse.Namespace) -> dict[str, Any]:
+    status = selected_status()
+    sink_id = require_sink(status)
+    return action_result(["wpctl", "set-default", sink_id], "Jabra selected as audio output")
+
+
+def command_volume(args: argparse.Namespace) -> dict[str, Any]:
+    status = selected_status()
+    sink_id = require_sink(status)
+    level = max(0, min(100, int(args.level)))
+    return action_result(["wpctl", "set-volume", sink_id, f"{level}%"], f"Volume {level}%")
+
+
+def command_volume_step(args: argparse.Namespace) -> dict[str, Any]:
+    status = selected_status()
+    sink_id = require_sink(status)
+    step = max(-25, min(25, int(args.step)))
+    if step == 0:
+        return {"ok": True, "message": "Volume unchanged"}
+    token = f"{abs(step)}%{'+' if step > 0 else '-'}"
+    return action_result(["wpctl", "set-volume", sink_id, token], "Volume adjusted")
+
+
+def command_mute(args: argparse.Namespace) -> dict[str, Any]:
+    status = selected_status()
+    sink_id = require_sink(status)
+    return action_result(["wpctl", "set-mute", sink_id, args.value], "Mute updated")
+
+
+def enable_sidetone_in_calls(status: dict[str, Any]) -> bool:
+    """Best-effort: switch DSP sidetone on when entering Calls mode, matching a
+    common desktop default. Never fails the profile switch.
+
+    Checks are ordered so the safest wins: the OMAJABRA_SIDETONE_IN_CALLS=0
+    opt-out short-circuits everything (including the test mock), and the GNP
+    write is attempted only on a model whose channel-3 protocol is validated.
+    OMAJABRA_GNP_MOCK_FILE stands in for the hardware in tests."""
+    if os.environ.get("OMAJABRA_SIDETONE_IN_CALLS", "1") == "0":
+        return False
+    if not omajabra_gnp.model_supports_sidetone(str(status.get("modalias", ""))):
+        return False
+    mock_path = os.environ.get("OMAJABRA_GNP_MOCK_FILE", "").strip()
+    if mock_path:
+        try:
+            data = read_json_file(Path(mock_path))
+        except (FileNotFoundError, ValueError, TypeError):
+            data = {}
+        data.setdefault("sidetone", {})["enabled"] = True
+        Path(mock_path).write_text(json.dumps(data), encoding="utf-8")
+        return True
+    address = str(status.get("address", ""))
+    if not ADDRESS_RE.fullmatch(address):
+        return False
+    try:
+        omajabra_gnp.enable_sidetone(address)
+        return True
+    except (omajabra_gnp.ProtocolError, OSError, TimeoutError):
+        return False
+
+
+def command_profile(args: argparse.Namespace) -> dict[str, Any]:
+    status = selected_status()
+    device_id = status.get("deviceId")
+    profiles = status.get("profiles")
+    selected = profiles.get(args.mode) if isinstance(profiles, dict) else None
+    index = selected.get("index") if isinstance(selected, dict) else None
+    if not isinstance(device_id, int) or not isinstance(index, int):
+        raise OmajabraError(f"The {args.mode} profile is unavailable")
+    label = "Music" if args.mode == "music" else "Calls"
+    result = action_result(
+        ["wpctl", "set-profile", str(device_id), str(index)], f"{label} profile selected"
+    )
+    if args.mode == "calls" and enable_sidetone_in_calls(status):
+        result["message"] = "Calls profile selected · sidetone on"
+    return result
+
+
+def emit_status(pretty: bool = False) -> None:
+    print(json.dumps(status_data(), indent=2 if pretty else None, sort_keys=True), flush=True)
+
+
+def command_watch(args: argparse.Namespace) -> int:
+    running = True
+
+    def stop(_signum: int, _frame: Any) -> None:
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    while running:
+        try:
+            emit_status()
+        except OmajabraError as error:
+            print(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "adapterAvailable": False,
+                        "connected": False,
+                        "paired": False,
+                        "name": "Jabra",
+                        "battery": None,
+                        "message": str(error),
+                        "checkedAt": int(time.time() * 1000),
+                    }
+                ),
+                flush=True,
+            )
+        deadline = time.monotonic() + args.interval
+        while running and time.monotonic() < deadline:
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Inspect and control paired Jabra audio devices")
+    parser.add_argument("--version", action="version", version=f"Omajabra {VERSION}")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    status_parser = subparsers.add_parser("status", help="Print the current Jabra status")
+    status_parser.add_argument("--pretty", action="store_true")
+
+    watch_parser = subparsers.add_parser("watch", help="Continuously print Jabra status")
+    watch_parser.add_argument("--interval", type=float, default=5.0)
+
+    subparsers.add_parser("connect", help="Connect the selected paired Jabra device")
+    subparsers.add_parser("disconnect", help="Disconnect the selected Jabra device")
+    subparsers.add_parser("activate", help="Use Jabra as the default audio output")
+
+    volume_parser = subparsers.add_parser("volume", help="Set Jabra output volume")
+    volume_parser.add_argument("level", type=int)
+    step_parser = subparsers.add_parser("volume-step", help="Adjust Jabra output volume")
+    step_parser.add_argument("step", type=int)
+    mute_parser = subparsers.add_parser("mute", help="Set or toggle Jabra output mute")
+    mute_parser.add_argument("value", choices=("0", "1", "toggle"), default="toggle", nargs="?")
+    profile_parser = subparsers.add_parser("profile", help="Select music or calls mode")
+    profile_parser.add_argument("mode", choices=("music", "calls"))
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    try:
+        if args.command == "status":
+            emit_status(args.pretty)
+            return 0
+        if args.command == "watch":
+            args.interval = max(1.0, min(60.0, args.interval))
+            return command_watch(args)
+        handlers = {
+            "connect": command_connect,
+            "disconnect": command_disconnect,
+            "activate": command_activate,
+            "volume": command_volume,
+            "volume-step": command_volume_step,
+            "mute": command_mute,
+            "profile": command_profile,
+        }
+        result = handlers[args.command](args)
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except OmajabraError as error:
+        print(json.dumps({"ok": False, "message": str(error)}, sort_keys=True))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

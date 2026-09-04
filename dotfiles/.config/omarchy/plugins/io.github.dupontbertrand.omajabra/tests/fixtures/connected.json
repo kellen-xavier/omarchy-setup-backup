@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "adapterAvailable": true,
+  "adapterPowered": true,
+  "paired": true,
+  "connected": true,
+  "address": "50:C2:ED:F6:DA:BB",
+  "name": "Jabra Elite 75t",
+  "battery": 78,
+  "audioAvailable": true,
+  "sinkId": 67,
+  "deviceId": 66,
+  "activeOutput": true,
+  "volume": 46,
+  "muted": false,
+  "codec": "AAC",
+  "profile": "a2dp-sink",
+  "profileMode": "music",
+  "profiles": {
+    "music": {
+      "index": 131076,
+      "name": "a2dp-sink",
+      "description": "High Fidelity Playback (A2DP Sink, codec AAC)"
+    },
+    "calls": {
+      "index": 196865,
+      "name": "headset-head-unit",
+      "description": "Headset Head Unit (HSP/HFP, codec MSBC)"
+    }
+  },
+  "microphoneAvailable": false,
+  "message": "Connected · active output"
+}

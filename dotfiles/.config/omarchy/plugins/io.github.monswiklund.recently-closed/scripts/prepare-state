@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Open, validate, and bounded-read the private history file."""
+
+import os
+import stat
+import sys
+
+MAX_BYTES = 1024 * 1024
+SUCCESS_MARKER = b"\nRC_STATE_OK\n"
+
+
+def fail(message, code=1):
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def main():
+    if len(sys.argv) != 2 or not sys.argv[1] or not os.path.dirname(sys.argv[1]):
+        fail("usage: prepare-state <path>", 2)
+
+    state = sys.argv[1]
+    old_umask = os.umask(0o077)
+    try:
+        os.makedirs(os.path.dirname(state), mode=0o700, exist_ok=True)
+    finally:
+        os.umask(old_umask)
+
+    flags = os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        fd = os.open(state, flags, 0o600)
+    except OSError as error:
+        fail(f"could not open state file safely: {state}: {error.strerror}")
+
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            fail(f"state path is not an owner-controlled regular file: {state}")
+
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+            fail(f"state file does not support owner-only permissions: {state}")
+        if info.st_size > MAX_BYTES:
+            fail(f"state file exceeds {MAX_BYTES} bytes: {state}")
+
+        data = bytearray()
+        while len(data) <= MAX_BYTES:
+            chunk = os.read(fd, min(65536, MAX_BYTES + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > MAX_BYTES:
+            fail(f"state file exceeds {MAX_BYTES} bytes: {state}")
+
+        sys.stdout.buffer.write(data + SUCCESS_MARKER)
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    main()

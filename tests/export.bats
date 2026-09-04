@@ -23,6 +23,11 @@ base-devel
 EOF
 
   echo '{"custom": true}' >"$FAKE_HOME/.config/waybar/config.jsonc"
+
+  # Plugin instalado via `omarchy plugin clone` — é um clone git de verdade
+  mkdir -p "$FAKE_HOME/.config/omarchy/plugins/fake.plugin/.git"
+  echo "ref: refs/heads/main" >"$FAKE_HOME/.config/omarchy/plugins/fake.plugin/.git/HEAD"
+  echo "console.log('plugin')" >"$FAKE_HOME/.config/omarchy/plugins/fake.plugin/plugin.js"
   cat >"$FAKE_HOME/.config/git/config" <<'EOF'
 [user]
 	name = Some Name
@@ -108,4 +113,11 @@ EOF
   ! grep -q "Some Name" "$WORKDIR/dotfiles/.config/git/config"
   ! grep -q "work@example-employer.com" "$WORKDIR/dotfiles/.config/git/config"
   grep -q "rebase = true" "$WORKDIR/dotfiles/.config/git/config"
+}
+
+@test "plugins clonados via git são copiados como conteúdo real, não como gitlink" {
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ -f "$WORKDIR/dotfiles/.config/omarchy/plugins/fake.plugin/plugin.js" ]
+  [ ! -e "$WORKDIR/dotfiles/.config/omarchy/plugins/fake.plugin/.git" ]
 }
