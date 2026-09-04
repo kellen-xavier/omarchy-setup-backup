@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -42,6 +42,10 @@ jobs:
     # Só corrige e comita de volta em push para develop/feature/*.
     # Push/PR na main fica no modo somente-verificação (job lint-check).
     if: github.event_name == 'push' && github.ref_name != 'main'
+    # Único job que precisa escrever no repo (comita o auto-fix de volta).
+    # Os demais jobs rodam com o "contents: read" padrão do workflow.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
