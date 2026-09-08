@@ -27,7 +27,6 @@
 	enabled = true           # Record and reuse conflict resolutions
 	autoupdate = true        # Apply stored conflict resolutions automatically
 [user]
-	name = Kellen.Xavier
-	email = kellen.xavier@paysimplex.com
+	# name/email intentionally stripped by export.sh (public repo) - set your own after restoring
 [credential]
 	helper = store

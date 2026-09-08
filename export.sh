@@ -75,7 +75,23 @@ mkdir -p dotfiles/.config/git
     fi
   done
 )
-[ -e "$HOME/.config/git/config" ] && cp "$HOME/.config/git/config" dotfiles/.config/git/config
+
+# omarchy/plugins/<id> (from `omarchy plugin clone`) are themselves git repos.
+# Left as-is, git would track them as gitlinks (submodule references) instead
+# of real content — this repo has no .gitmodules, so those would silently
+# restore to nothing. Strip the nested .git so they're backed up as plain files.
+find dotfiles -mindepth 2 -type d -name ".git" -exec rm -rf {} +
+if [ -e "$HOME/.config/git/config" ]; then
+  # This repo is public: never let [user] name/email (often a work address)
+  # leak into it. Everything else in the config (aliases, [pull], [diff]...)
+  # is not sensitive and stays.
+  awk '
+    /^\[user\]/ { print; print "\t# name/email intentionally stripped by export.sh (public repo) - set your own after restoring"; in_user=1; next }
+    /^\[/ { in_user=0 }
+    in_user && /^[[:space:]]*(name|email)[[:space:]]*=/ { next }
+    { print }
+  ' "$HOME/.config/git/config" >dotfiles/.config/git/config
+fi
 [ -e "$HOME/.config/git/ignore" ] && cp "$HOME/.config/git/ignore" dotfiles/.config/git/ignore
 find dotfiles -name "*.bak*" -delete
 

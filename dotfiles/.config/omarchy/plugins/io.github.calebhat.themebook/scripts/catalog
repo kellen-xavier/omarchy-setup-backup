@@ -1,0 +1,302 @@
+#!/bin/bash
+# Emit JSON for every installed Omarchy theme (user overlays win on slug).
+
+set -euo pipefail
+
+# One deadline for the whole producer: TERM, then KILL. Do not stack
+# a 5s find timeout per theme (256 × 5s would be unbounded in practice).
+if [[ ${THEMEBOOK_CATALOG_WRAPPED:-0} != 1 ]] && command -v timeout >/dev/null 2>&1; then
+  export THEMEBOOK_CATALOG_WRAPPED=1
+  exec timeout --signal=TERM --kill-after=2s 12s /bin/bash "$0" "$@"
+fi
+
+USER_THEMES_PATH="$HOME/.config/omarchy/themes"
+OMARCHY_THEMES_PATH="${OMARCHY_PATH:-/usr/share/omarchy}/themes"
+CURRENT_THEME=$(tr -d '\n' <"$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null || true)
+CURRENT_BG=$(readlink -f "$HOME/.local/state/omarchy/current/background" 2>/dev/null || true)
+MAX_THEMES=256
+MAX_BACKGROUNDS=48
+MAX_PATH_BYTES=512
+MAX_JSON_BYTES=1048576
+
+capped_find() {
+  local max=$1
+  shift
+  "$@" 2>/dev/null | head -n "$max" || true
+}
+
+runtime_dir=${XDG_RUNTIME_DIR:-$HOME/.cache/omarchy}
+mkdir -p "$runtime_dir"
+tmp=$(mktemp "$runtime_dir/themebook-catalog.XXXXXX")
+cleanup() { rm -f "$tmp"; }
+on_term() { printf '[]\n'; cleanup; exit 0; }
+trap cleanup EXIT
+trap on_term TERM
+theme_count=0
+
+DEFAULTS_JSON="{}"
+cfg_file=$HOME/.config/omarchy/themebook.json
+if [[ -f $cfg_file ]]; then
+  cfg_size=$(stat -c%s "$cfg_file" 2>/dev/null || echo 0)
+  if (( cfg_size > 0 && cfg_size <= 262144 )); then
+    DEFAULTS_JSON=$(head -c 262144 "$cfg_file")
+  fi
+fi
+
+json_room() {
+  local size=0
+  [[ -f $tmp ]] && size=$(stat -c%s "$tmp")
+  (( size < MAX_JSON_BYTES ))
+}
+
+short_path() {
+  (( ${#1} <= MAX_PATH_BYTES ))
+}
+
+path_allowed() {
+  local file=$1
+  local slug=$2
+  local real theme_real
+  real=$(realpath -e "$file" 2>/dev/null) || return 1
+  theme_real=$(realpath -e "$USER_THEMES_PATH/$slug" 2>/dev/null || true)
+  if [[ -n $theme_real && $real == "$theme_real/"* ]]; then
+    return 0
+  fi
+  theme_real=$(realpath -e "$OMARCHY_THEMES_PATH/$slug" 2>/dev/null || true)
+  if [[ -n $theme_real && $real == "$theme_real/"* ]]; then
+    return 0
+  fi
+  [[ $real == "$HOME/.config/omarchy/backgrounds/$slug/"* ]]
+}
+
+title_case() {
+  sed -E 's/(^|-)([a-z])/\1\u\2/g; s/-/ /g' <<<"$1"
+}
+
+find_preview() {
+  local theme_path=$1
+  local slug=${theme_path##*/}
+  local preview_name candidate
+  for preview_name in preview.png preview.jpg preview.jpeg preview.webp preview.gif preview.bmp; do
+    candidate=$theme_path/$preview_name
+    if [[ -f $candidate ]] && short_path "$candidate" && path_allowed "$candidate" "$slug"; then
+      realpath -e "$candidate"
+      return
+    fi
+  done
+  if [[ -d $theme_path/backgrounds ]]; then
+    while IFS= read -r candidate; do
+      if short_path "$candidate" && path_allowed "$candidate" "$slug"; then
+        realpath -e "$candidate"
+        return
+      fi
+    done < <(capped_find "$MAX_BACKGROUNDS" find -P "$theme_path/backgrounds" -maxdepth 1 -type f \
+      \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.webp' \) \
+      -print | sort)
+  fi
+  if [[ -f $theme_path/colors.toml ]]; then
+    make_swatch "$slug" "$theme_path/colors.toml" || true
+  fi
+  return 0
+}
+
+list_backgrounds() {
+  local theme_path=$1
+  local slug=${theme_path##*/}
+  local user_bg=$HOME/.config/omarchy/backgrounds/$slug
+  local candidate
+  {
+    if [[ -d $user_bg ]]; then
+      capped_find "$MAX_BACKGROUNDS" find -P "$user_bg" -maxdepth 1 -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.webp' \) -print
+    fi
+    if [[ -d $theme_path/backgrounds ]]; then
+      capped_find "$MAX_BACKGROUNDS" find -P "$theme_path/backgrounds" -maxdepth 1 -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.bmp' -o -iname '*.webp' \) -print
+    fi
+  } | sort -u | head -n "$MAX_BACKGROUNDS" | while IFS= read -r candidate; do
+    short_path "$candidate" || continue
+    if path_allowed "$candidate" "$slug"; then
+      realpath -e "$candidate"
+    fi
+  done
+}
+
+lookup_thumb() {
+  local image=$1
+  local cache=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/image-selector
+  local signature hash thumbnail
+  [[ -n $image && -f $image ]] || return 0
+  signature=$(stat -Lc '%s:%Y' "$image" 2>/dev/null) || return 0
+  hash=$(printf '%s\t%s' "$image" "$signature" | md5sum | cut -d ' ' -f 1)
+  thumbnail=$cache/$hash.jpg
+  if [[ -f $thumbnail ]]; then
+    printf '%s\n' "$thumbnail"
+  else
+    printf '%s\n' "$image"
+  fi
+}
+
+get_color() {
+  local file=$1
+  local key=$2
+  # Missing colors.toml is normal for Aether/git themes. Never return 1:
+  # emit_theme runs under set -e, so a failed command substitution aborts
+  # the whole catalog and the panel gets an empty theme list.
+  [[ -n $file && -f $file ]] || return 0
+  sed -nE "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*\"?([^\"[:space:]]+).*/\1/p" "$file" 2>/dev/null | head -n 1 || true
+}
+
+make_swatch() {
+  local slug=$1
+  local colors=$2
+  local dir=$HOME/.cache/omarchy/themebook/swatches
+  local out=$dir/$slug.jpg
+  local bg ac
+  mkdir -p "$dir"
+  bg=$(get_color "$colors" background)
+  ac=$(get_color "$colors" accent)
+  [[ -n $bg ]] || bg="#1a1a1a"
+  [[ -n $ac ]] || ac="#888888"
+  if [[ -f $out && ( ! -f $colors || $out -nt $colors ) ]]; then
+    printf '%s\n' "$out"
+    return
+  fi
+  if command -v magick >/dev/null 2>&1; then
+    magick -size 1536x864 "xc:$bg" -fill "$ac" -draw "rectangle 0,700 1536,864" "$out" 2>/dev/null || return 0
+    printf '%s\n' "$out"
+  fi
+  return 0
+}
+
+emit_theme() {
+  local slug=$1
+  local theme_path=$2
+  local source=$3
+  # Skip this theme only. A non-zero return would kill the rest of the catalog.
+  [[ $slug =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 0
+  [[ $slug != *..* ]] || return 0
+  local colors_file preview is_current=false is_git=false
+  local accent background foreground red orange yellow green cyan blue magenta mode
+  local bg_json='[]'
+
+  preview=$(find_preview "$theme_path")
+  if [[ -n $DEFAULTS_JSON ]]; then
+    local def
+    def=$(jq -r --arg s "$slug" '(.defaultWallpapers // {})[$s] // empty' <<<"$DEFAULTS_JSON" 2>/dev/null || true)
+    if [[ -n $def && $def != null ]] && short_path "$def" && [[ -f $def ]] && path_allowed "$def" "$slug"; then
+      preview=$def
+    fi
+  fi
+  local thumbnail=$preview
+  if [[ -n $preview ]]; then
+    thumbnail=$(lookup_thumb "$preview")
+  fi
+  colors_file=$theme_path/colors.toml
+  [[ -f $colors_file ]] || colors_file=""
+
+  accent=$(get_color "$colors_file" accent)
+  background=$(get_color "$colors_file" background)
+  foreground=$(get_color "$colors_file" foreground)
+  red=$(get_color "$colors_file" red)
+  orange=$(get_color "$colors_file" orange)
+  yellow=$(get_color "$colors_file" yellow)
+  green=$(get_color "$colors_file" green)
+  cyan=$(get_color "$colors_file" cyan)
+  blue=$(get_color "$colors_file" blue)
+  magenta=$(get_color "$colors_file" magenta)
+  mode=$(get_color "$colors_file" mode)
+  mode=${mode,,}
+
+  [[ $slug == "$CURRENT_THEME" ]] && is_current=true
+  [[ -d $theme_path/.git ]] && is_git=true
+
+  json_room || return 0
+  (( theme_count < MAX_THEMES )) || return 0
+  if command -v jq >/dev/null 2>&1; then
+    bg_json=$(list_backgrounds "$theme_path" | jq -R -s -c --argjson max "$MAX_BACKGROUNDS" \
+      'split("\n") | map(select(length > 0 and length <= 512)) | .[:$max]')
+  fi
+
+  jq -cn \
+    --arg slug "$slug" \
+    --arg name "$(title_case "$slug")" \
+    --arg path "$theme_path" \
+    --arg source "$source" \
+    --arg preview "$preview" \
+    --arg thumbnail "$thumbnail" \
+    --arg mode "$mode" \
+    --argjson current "$is_current" \
+    --argjson git "$is_git" \
+    --argjson backgrounds "$bg_json" \
+    --arg currentBg "$CURRENT_BG" \
+    --arg accent "$accent" \
+    --arg background "$background" \
+    --arg foreground "$foreground" \
+    --arg red "$red" \
+    --arg orange "$orange" \
+    --arg yellow "$yellow" \
+    --arg green "$green" \
+    --arg cyan "$cyan" \
+    --arg blue "$blue" \
+    --arg magenta "$magenta" \
+    '{
+      slug: $slug,
+      name: $name,
+      path: $path,
+      source: $source,
+      preview: $preview,
+      thumbnail: $thumbnail,
+      mode: $mode,
+      current: $current,
+      git: $git,
+      backgrounds: $backgrounds,
+      currentBackground: $currentBg,
+      colors: {
+        accent: $accent,
+        background: $background,
+        foreground: $foreground,
+        red: $red,
+        orange: $orange,
+        yellow: $yellow,
+        green: $green,
+        cyan: $cyan,
+        blue: $blue,
+        magenta: $magenta
+      }
+    }' >>"$tmp"
+  theme_count=$((theme_count + 1))
+}
+
+user_themes=()
+if [[ -d $USER_THEMES_PATH ]]; then
+  while IFS= read -r theme_path; do
+    user_themes+=("${theme_path##*/}")
+  done < <(capped_find "$MAX_THEMES" find -L "$USER_THEMES_PATH" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print | sort)
+fi
+
+if [[ -d $OMARCHY_THEMES_PATH ]]; then
+  while IFS= read -r theme_path; do
+    slug=${theme_path##*/}
+    skip=false
+    for u in "${user_themes[@]}"; do
+      if [[ $u == "$slug" ]]; then
+        skip=true
+        break
+      fi
+    done
+    if [[ $skip == false ]]; then
+      emit_theme "$slug" "$theme_path" "stock"
+    fi
+  done < <(capped_find "$MAX_THEMES" find -L "$OMARCHY_THEMES_PATH" -mindepth 1 -maxdepth 1 -type d -print | sort)
+fi
+
+for slug in "${user_themes[@]}"; do
+  emit_theme "$slug" "$USER_THEMES_PATH/$slug" "user"
+done
+
+if ! json_room; then
+  printf '[]\n'
+  exit 0
+fi
+jq -s --argjson max "$MAX_THEMES" 'sort_by(.name) | .[:$max]' "$tmp" || printf '[]\n'

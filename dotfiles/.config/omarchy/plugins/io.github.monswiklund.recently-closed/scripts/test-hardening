@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Security invariants for untrusted window text and private persisted history.
+
+set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+
+failures=0
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+
+check() {
+  if [[ $2 == "$3" ]]; then
+    echo "ok   $1"
+  else
+    failures=$((failures + 1))
+    echo "FAIL $1"
+    echo "     expected $3"
+    echo "     got      $2"
+  fi
+}
+
+state="$scratch/state home/omarchy/recently-closed.json"
+umask 022
+scripts/prepare-state "$state" >/dev/null
+check "a new history file is owner-only" "$(stat -c '%a' -- "$state")" "600"
+
+printf 'private history\n' >"$state"
+chmod 0644 "$state"
+scripts/prepare-state "$state" >/dev/null
+check "an old broad mode is repaired" "$(stat -c '%a' -- "$state")" "600"
+check "repairing permissions preserves history" "$(cat "$state")" "private history"
+
+target="$scratch/target"
+printf 'leave me alone\n' >"$target"
+link="$scratch/history-link"
+ln -s "$target" "$link"
+if scripts/prepare-state "$link" >/dev/null 2>&1; then
+  symlink_result="accepted"
+else
+  symlink_result="refused"
+fi
+check "a state-file symlink is refused" "$symlink_result" "refused"
+check "the symlink target is untouched" "$(cat "$target")" "leave me alone"
+
+fifo="$scratch/history-fifo"
+mkfifo "$fifo"
+timeout 2 scripts/prepare-state "$fifo" >/dev/null 2>&1
+check "a non-regular state path is refused without blocking" "$?" "1"
+
+printf '[{"cmd":"safe"}]\n' >"$state"
+read_output=$(scripts/prepare-state "$state")
+check "a successful descriptor read carries its completion marker" \
+  "${read_output##*$'\n'}" "RC_STATE_OK"
+
+oversized="$scratch/oversized.json"
+truncate -s $((1024 * 1024 + 1)) "$oversized"
+chmod 0600 "$oversized"
+if scripts/prepare-state "$oversized" >"$scratch/oversized.out" 2>/dev/null; then
+  oversized_result="accepted"
+else
+  oversized_result="refused"
+fi
+check "an oversized state file is refused before stdout" "$oversized_result" "refused"
+check "an oversized state file reaches QML as no data" \
+  "$(wc -c <"$scratch/oversized.out")" "0"
+
+check "the reader opens the pathname once" \
+  "$(grep -Ec 'open\(state' scripts/prepare-state || true)" "1"
+check "validation is bound to the opened descriptor" \
+  "$(grep -Ec 'os\.fstat\(fd\)' scripts/prepare-state || true)" "2"
+check "bounded reading stays on that descriptor" \
+  "$(grep -Ec 'os\.read\(fd,' scripts/prepare-state || true)" "1"
+check "the descriptor open refuses final-component symlinks" \
+  "$(grep -Ec 'os\.O_NOFOLLOW' scripts/prepare-state || true)" "1"
+
+bare_text=$(grep -Ec '^[[:space:]]*Text[[:space:]]*\{' Panel.qml || true)
+plain_owner=$(grep -Ec '^[[:space:]]*component SafeText: Text[[:space:]]*\{' Panel.qml || true)
+plain_format=$(grep -Ec '^[[:space:]]*textFormat:[[:space:]]*Text\.PlainText' Panel.qml || true)
+check "the panel has no automatic-format Text labels" "$bare_text" "0"
+check "one SafeText type owns direct label rendering" "$plain_owner" "1"
+check "SafeText renders markup as text" "$plain_format" "1"
+
+for file in Panel.qml Service.qml; do
+  direct_read=$(grep -Ec 'stateFile\.reload\(\)|Model\.parseClosed\(text\(\)\)' "$file" || true)
+  bounded_read=$(grep -Ec 'Model\.parseStateOutput\(output\)' "$file" || true)
+  coalesced=$(grep -Ec 'stateReader\.running \|\| !root\.stateReadStreamDone' "$file" || true)
+  rechecked=$(grep -Ec '^[[:space:]]*onSaved:[[:space:]]*root\.requestStateRead\(\)' "$file" || true)
+  check "$file never reopens state through FileView" "$direct_read" "0"
+  check "$file accepts only bounded helper output" "$bounded_read" "1"
+  check "$file does not drop a replacement during an active read" "$coalesced" "2"
+  check "$file re-reads safely after saves" "$rechecked" "1"
+done
+
+exit $((failures == 0 ? 0 : 1))

@@ -1,15 +1,13 @@
-# Omarchy webapps (Name|URL) — recreated with `omarchy-webapp-install`
-# Handler-based ones (HEY, Zoom) are skipped: they use custom protocol handlers
-# and should be re-added manually via Omarchy's app installer if still needed.
+Basecamp|https://launchpad.37signals.com
+ChatGPT|https://chatgpt.com/
 Discord|https://discord.com/channels/@me
 Figma|https://figma.com/
-Basecamp|https://launchpad.37signals.com
-YouTube|https://youtube.com/
-X|https://x.com/
-ChatGPT|https://chatgpt.com/
+Fizzy|https://app.fizzy.do/
 GitHub|https://github.com/
 Google Contacts|https://contacts.google.com/
-Fizzy|https://app.fizzy.do/
+Google Maps|https://maps.google.com
 Google Messages|https://messages.google.com/web/conversations
 Google Photos|https://photos.google.com/
 WhatsApp|https://web.whatsapp.com/
+X|https://x.com/
+YouTube|https://youtube.com/

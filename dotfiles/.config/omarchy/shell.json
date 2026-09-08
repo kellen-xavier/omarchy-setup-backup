@@ -1,0 +1,103 @@
+{
+  "bar": {
+    "centerAnchor": "omarchy.clock",
+    "layout": {
+      "center": [
+        {
+          "id": "omarchy.indicators"
+        },
+        {
+          "format": "dddd HH:mm",
+          "formatAlt": "d MMMM 'W'ww yyyy",
+          "id": "omarchy.clock",
+          "verticalFormat": "HH\n—\nmm"
+        },
+        {
+          "id": "omarchy.keyboard-layout"
+        },
+        {
+          "id": "omarchy.weather"
+        },
+        {
+          "id": "omarchy.system-update"
+        }
+      ],
+      "left": [
+        {
+          "id": "omarchy.menu"
+        },
+        {
+          "id": "omarchy.workspaces"
+        }
+      ],
+      "right": [
+        {
+          "id": "omarchy.tray"
+        },
+        {
+          "id": "io.github.hopelezz.omabuds"
+        },
+        {
+          "id": "io.github.dupontbertrand.omajabra"
+        },
+        {
+          "id": "io.github.twoscott.mouse-battery"
+        },
+        {
+          "id": "io.github.monswiklund.recently-closed"
+        },
+        {
+          "id": "mich.spotmarchy"
+        },
+        {
+          "id": "io.github.grichard99.omaproton-vpn"
+        },
+        {
+          "id": "bibek.focusd"
+        },
+        {
+          "id": "slcode777.omagotchi"
+        },
+        {
+          "id": "crmne.hyprmoncfg"
+        },
+        {
+          "id": "rperaza.obsidian-notes"
+        },
+        {
+          "id": "omarchy.agents"
+        },
+        {
+          "id": "omarchy.bluetooth"
+        },
+        {
+          "id": "omarchy.network"
+        },
+        {
+          "id": "omarchy.audio"
+        },
+        {
+          "id": "omarchy.monitor"
+        },
+        {
+          "id": "omarchy.power"
+        }
+      ]
+    },
+    "position": "top",
+    "transparent": false
+  },
+  "idle": {
+    "lock": 3000,
+    "screensaver": 3000
+  },
+  "plugins": [
+    {
+      "id": "io.github.calebhat.themebook"
+    },
+    {
+      "id": "io.github.tallsam.navbar-cat"
+    }
+  ],
+  "version": 1
+}

@@ -5,15 +5,23 @@ reinstalar rapidamente em outra máquina.
 
 ## Aviso importante
 
-Esta pasta foi gerada dentro de uma [sessão de agente sandboxed - leia mais aqui](https://github.com/akitaonrails/ai-jail), que **não tem acesso ao banco de dados real do pacman** desta máquina (roda isolado, só o seu
-`$HOME` está montado de verdade). Por isso:
+Este backup pode ter sido gerado ou atualizado a partir de uma [sessão de
+agente sandboxed - leia mais aqui](https://github.com/akitaonrails/ai-jail),
+que **não tem acesso ao banco de dados real do pacman** desta máquina (roda
+isolado, só o seu `$HOME` está montado de verdade). Nesse caso:
 
 - `dotfiles/` é **real** — são cópias de verdade dos seus arquivos de config.
 - `packages/pacman-extra.txt`, `packages/aur-extra.txt` e `packages/flatpak.txt`
-  são um **palpite** baseado nas pastas presentes em `~/.config` (ex: pasta
-  `~/.config/darktable` → pacote `darktable`). **Antes de usar em outra
-  máquina, rode `./export.sh` num terminal normal desta máquina** para
-  regenerar essas listas com o `pacman -Qqe` / `pacman -Qqm` reais.
+  podem ser um **palpite** baseado nas pastas presentes em `~/.config` (ex:
+  pasta `~/.config/darktable` → pacote `darktable`).
+
+**Antes de usar em outra máquina, rode `./export.sh` num terminal normal
+desta máquina** (fora de qualquer sandbox) para regenerar essas listas com o
+`pacman -Qqe` / `pacman -Qqm` reais — é isso que torna o backup autoritativo.
+
+Segurança de dados sensíveis (o que nunca entra aqui, riscos de rodar
+`install.sh` numa máquina nova, permissões de CI) está documentada à parte em
+[`SECURITY.md`](SECURITY.md).
 
 ## O que está aqui
 
