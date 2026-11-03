@@ -26,6 +26,13 @@ data em vez de número de versão.
 - `-y`/`--yes` e `-h`/`--help` em `install.sh`, `-h`/`--help` em `export.sh`,
   pra deixar os três scripts consistentes e roteirizáveis (necessário pros
   testes automatizados).
+- add script de personalização (aa986f9)
+- backup sistema operacional omarchy (3245348)
+
+### Changed
+
+- add config de pipeline and tests (4763060)
+- add changelog into the repo (ffe5db0)
 
 ### Fixed
 
@@ -50,21 +57,7 @@ data em vez de número de versão.
   not match any` porque o `actions/checkout` com `ref: <sha>` deixa o HEAD
   destacado (sem branch local). Corrigido com `git checkout -B main` logo
   após o checkout.
-
-### Added
-
-- add script de personalização (aa986f9)
-- backup sistema operacional omarchy (3245348)
-
-### Fixed
-
 - check tags release (e204a08)
-
-### Changed
-
-- add config de pipeline and tests (4763060)
-- add changelog into the repo (ffe5db0)
-
 
 ## [2026-08-15] - Script de personalização visual
 

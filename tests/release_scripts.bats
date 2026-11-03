@@ -143,6 +143,73 @@ EOF
   [ "$(sed -n '1p' "$BATS_TEST_TMPDIR/order.txt")" -lt "$(sed -n '2p' "$BATS_TEST_TMPDIR/order.txt")" ]
 }
 
+@test "funde categorias iguais (manual + gerada) num único bloco por seção" {
+  changelog="$BATS_TEST_TMPDIR/CHANGELOG.md"
+  cat >"$changelog" <<'EOF'
+# Changelog
+
+## [Não lançado]
+
+### Added
+
+- nota manual de added
+
+### Fixed
+
+- nota manual de fixed
+
+## [2026-08-15] - Backup inicial
+
+### Added
+
+- coisa antiga
+EOF
+  body="$BATS_TEST_TMPDIR/body.md"
+  printf '### Added\n\n- added gerado (abc123)\n### Fixed\n\n- fixed gerado (def456)\n### Changed\n\n- changed gerado (ghi789)\n' >"$body"
+
+  run "$INSERT_SCRIPT" "$changelog" "v2026.08.16" "2026-08-16" "$body"
+  [ "$status" -eq 0 ]
+
+  # dentro da nova seção (até o próximo "## "), cada categoria aparece uma vez só
+  section="$BATS_TEST_TMPDIR/section.md"
+  awk '/^## \[v2026.08.16\]/{f=1; next} f && /^## /{exit} f{print}' "$changelog" >"$section"
+  [ "$(grep -c '^### Added$' "$section")" -eq 1 ]
+  [ "$(grep -c '^### Fixed$' "$section")" -eq 1 ]
+  [ "$(grep -c '^### Changed$' "$section")" -eq 1 ]
+
+  # os dois bullets de Added convivem no mesmo bloco, manual antes do gerado
+  grep -q "nota manual de added" "$section"
+  grep -q "added gerado (abc123)" "$section"
+  man="$(grep -n 'nota manual de added' "$section" | cut -d: -f1)"
+  gen="$(grep -n 'added gerado (abc123)' "$section" | cut -d: -f1)"
+  [ "$man" -lt "$gen" ]
+}
+
+@test "não deixa linhas em branco duplicadas no CHANGELOG" {
+  changelog="$BATS_TEST_TMPDIR/CHANGELOG.md"
+  cat >"$changelog" <<'EOF'
+# Changelog
+
+## [Não lançado]
+
+## [2026-08-15] - Backup inicial
+
+### Added
+
+- coisa antiga
+EOF
+  # corpo com linha em branco final, como o conventional-notes.sh realmente emite
+  body="$BATS_TEST_TMPDIR/body.md"
+  printf '### Added\n\n- coisa nova (abc123)\n\n' >"$body"
+
+  run "$INSERT_SCRIPT" "$changelog" "v2026.08.16" "2026-08-16" "$body"
+  [ "$status" -eq 0 ]
+
+  # nenhuma ocorrência de duas linhas vazias consecutivas
+  run awk 'prev=="" && $0=="" {print NR; found=1} {prev=$0} END{exit found?0:1}' "$changelog"
+  [ "$status" -ne 0 ]
+}
+
 @test "falha com mensagem clara se o CHANGELOG não existe" {
   body="$BATS_TEST_TMPDIR/body.md"
   echo "- x" >"$body"
