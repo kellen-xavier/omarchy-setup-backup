@@ -5,8 +5,10 @@
 # de novo por cima da seção recém-criada.
 #
 # Qualquer bullet já escrito à mão em [Não lançado] antes da release (prática
-# normal deste repo) é preservado: some da seção Unreleased e entra no topo
-# do corpo da nova seção de versão, antes das notas geradas automaticamente.
+# normal deste repo) é preservado e MESCLADO com as notas geradas: para cada
+# categoria (### Added, ### Fixed, ...) sai um único bloco, com os bullets
+# escritos à mão antes dos gerados automaticamente — nunca dois blocos com o
+# mesmo cabeçalho na mesma versão.
 #
 # Uso: insert-changelog-section.sh <changelog> <versão> <data-iso> <arquivo-com-corpo>
 set -euo pipefail
@@ -30,58 +32,79 @@ grep -q '^## \[Não lançado\]' "$CHANGELOG" || {
 }
 
 tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+captured="$(mktemp)"
+merged="$(mktemp)"
+trap 'rm -f "$tmp" "$captured" "$merged"' EXIT
 
-awk -v version="$VERSION" -v date="$DATE" -v bodyfile="$BODY_FILE" '
-  function flush_section(   i, start, end) {
+# 1) Extrai o corpo escrito manualmente em [Nao lancado] (entre o cabecalho e o
+#    próximo "## ").
+awk '
+  /^## \[Não lançado\]/ { cap = 1; next }
+  cap && /^## /          { cap = 0 }
+  cap                    { print }
+' "$CHANGELOG" >"$captured"
+
+# 2) Mescla o conteúdo manual com as notas geradas num único bloco por
+#    categoria. A ordem das categorias segue a primeira aparição (manual
+#    primeiro, pois é concatenado antes); dentro de cada categoria os bullets
+#    manuais vêm antes dos gerados. Linhas antes de qualquer "### " viram
+#    preâmbulo (ex.: o aviso "Sem mudanças notáveis").
+cat "$captured" "$BODY_FILE" | awk '
+  /^### / {
+    cat = $0
+    if (!(cat in seen)) { seen[cat] = ++ncat; order[ncat] = cat }
+    cur = cat
+    next
+  }
+  {
+    if (cur == "") { pre[++npre] = $0; next }
+    bucket[cur] = bucket[cur] $0 "\n"
+  }
+  END {
+    for (i = 1; i <= npre; i++) print pre[i]
+    for (k = 1; k <= ncat; k++) {
+      print order[k]
+      print ""
+      printf "%s", bucket[order[k]]
+    }
+  }
+' >"$merged"
+
+# 3) Reconstrói o CHANGELOG: mantém [Não lançado] vazia, descarta o corpo
+#    manual antigo e insere a nova seção de versão com o bloco mesclado.
+awk -v version="$VERSION" -v date="$DATE" -v mergedfile="$merged" '
+  /^## \[Não lançado\]/ && !done {
+    print
+    print ""
     print "## [" version "] - " date
     print ""
-
-    # imprime o que já estava escrito à mão em [Não lançado], sem as linhas
-    # em branco de sobra no início/fim
-    start = 1
-    end = n_captured
-    while (start <= end && captured[start] == "") start++
-    while (end >= start && captured[end] == "") end--
-    if (end >= start) {
-      for (i = start; i <= end; i++) print captured[i]
-      print ""
-    }
-
-    while ((getline line < bodyfile) > 0) print line
-  }
-
-  BEGIN { state = "normal"; inserted = 0; n_captured = 0 }
-
-  state == "normal" && /^## \[Não lançado\]/ && !inserted {
-    print
-    state = "capture"
+    while ((getline line < mergedfile) > 0) print line
+    close(mergedfile)
+    cap = 1
+    done = 1
     next
   }
-
-  state == "capture" && /^## / {
-    print ""
-    flush_section()
-    print ""
-    print
-    state = "normal"
-    inserted = 1
-    next
-  }
-
-  state == "capture" {
-    captured[++n_captured] = $0
-    next
-  }
-
+  cap && /^## / { cap = 0 } # chegou na próxima seção já existente
+  cap           { next }    # engole o corpo antigo de [Não lançado]
   { print }
-
-  END {
-    if (state == "capture") {
-      print ""
-      flush_section()
-    }
-  }
 ' "$CHANGELOG" >"$tmp"
 
-mv "$tmp" "$CHANGELOG"
+# 4) Normaliza: colapsa sequências de linhas em branco em uma só e remove as
+#    linhas em branco do fim do arquivo (mantém idempotente entre releases).
+awk '
+  { lines[NR] = $0 }
+  END {
+    last = NR
+    while (last > 0 && lines[last] == "") last--
+    blank = 0
+    for (i = 1; i <= last; i++) {
+      if (lines[i] == "") {
+        if (blank) continue
+        blank = 1
+      } else {
+        blank = 0
+      }
+      print lines[i]
+    }
+  }
+' "$tmp" >"$CHANGELOG"
