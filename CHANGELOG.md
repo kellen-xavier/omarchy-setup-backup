@@ -8,6 +8,12 @@ data em vez de número de versão.
 
 ## [Não lançado]
 
+## [v2026.11.03] - 2026-11-03
+
+### Fixed
+
+- bugs scripts shell for install (5bc9885)
+
 ## [v2026.08.15] - 2026-08-15
 
 ### Added
